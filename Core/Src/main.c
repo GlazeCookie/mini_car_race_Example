@@ -35,11 +35,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* 陀螺仪调试打印开关。置 1 会引入约 5.4 kB 的浮点 printf 代码，
-   MDK-Lite 的 32 kB 链接上限会因此报 L6047U 而链接失败。
-   平时保持 0；要串口看数据时改成 1（并注意镜像大小）。 */
-#define GYRO_DEBUG 1
-#define IF_start_Brushless_motor 1 //是否启动无刷电机，1为启动，0为不启动
+#define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
+#define RUN_KEY_DEBOUNCE_MS 20U
+#define RUN_START_DELAY_MS  2000U
+/* 循迹参数：线的有效电平、PWM 和增益均需根据实际硬件调整。 */
+#define LINE_ACTIVE_LEVEL  0U
+#define LINE_BASE_PWM      1000
+#define LINE_MAX_PWM       1800
+#define LINE_KP            80
+#define LINE_MAX_ACTIVE    6U
+#define LINE_PERIOD_MS     10U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -158,7 +163,75 @@ int fputc(int ch, FILE *f)
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
-float gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z; // 陀螺仪数据
+static int32_t Line_ClampPwm(int32_t pwm)
+{
+  if (pwm < 0) return 0;
+  if (pwm > LINE_MAX_PWM) return LINE_MAX_PWM;
+  return pwm;
+}
+
+/* 光电管从左到右编号 0~11，位置权重为 -11、-9、...、9、11。 */
+static uint8_t Line_GetError(float *error)
+{
+  uint16_t mux_value;
+  int32_t position_sum = 0;
+  uint8_t active_count = 0;
+  uint8_t i;
+
+  MUX_get_value(&mux_value);
+  for (i = 0; i < MULTIPLEXER_CHANNEL_NUM; ++i)
+  {
+    if (MUX_GET_CHANNEL(mux_value, i) == LINE_ACTIVE_LEVEL)
+    {
+      position_sum += (int32_t)i * 2 - 11;
+      ++active_count;
+    }
+  }
+
+  /* 丢线或检测区域过宽时停车；阈值需要按赛道调整。 */
+  if (active_count == 0U || active_count > LINE_MAX_ACTIVE) return 0U;
+  *error = (float)position_sum / active_count;
+  return 1U;
+}
+
+static void Line_FollowStep(void)
+{
+  float error;
+  int32_t correction;
+
+  if (!Line_GetError(&error))
+  {
+    TIM1->CCR1 = 0U;
+    TIM1->CCR2 = 0U;
+    return;
+  }
+
+  correction = (int32_t)(LINE_KP * error);
+  TIM1->CCR1 = (uint32_t)Line_ClampPwm(LINE_BASE_PWM + correction);
+  TIM1->CCR2 = (uint32_t)Line_ClampPwm(LINE_BASE_PWM - correction);
+}
+
+/* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
+static void WaitForRunKey(void)
+{
+  for (;;)
+  {
+    if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET)
+    {
+      HAL_Delay(RUN_KEY_DEBOUNCE_MS);
+      if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET)
+      {
+        break;
+      }
+    }
+    else
+    {
+      HAL_Delay(1U);
+    }
+  }
+
+  HAL_Delay(RUN_START_DELAY_MS);
+}
 /* USER CODE END 0 */
 void Init_brushless_motor(void)
 {
@@ -219,11 +292,8 @@ int main(void)
   Init_brushless_motor(); //等待无刷电调负压启动完成
   /* USER CODE BEGIN 2 */
   dodo_BMI270_init(); // 初始化陀螺仪
-  //pwm示例
-  //TIM1->CCR1 = 2000;
-  //TIM1->CCR2 = 2000;
-  // 延时5000秒，等待无刷电调初始化
-  // TIM1->PSC = 0;
+  /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
+  WaitForRunKey();
 
   /* USER CODE END 2 */
 
@@ -231,23 +301,8 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    // 以下为陀螺仪使用示例
-    dodo_BMI270_get_data();                         // 调用此函数会更新陀螺仪数据
-    gyro_x = BMI270_gyro_transition(BMI270_gyro_x); // 将原始陀螺仪数据转换为物理值，单位为度每秒
-    gyro_y = BMI270_gyro_transition(BMI270_gyro_y);
-    gyro_z = BMI270_gyro_transition(BMI270_gyro_z);
-    accel_x = BMI270_acc_transition(BMI270_accel_x); // 将原始加速度计数据转换为物理值，单位为g，一般不需要使用此数据
-    accel_y = BMI270_acc_transition(BMI270_accel_y);
-    accel_z = BMI270_acc_transition(BMI270_accel_z);
-    if (GYRO_DEBUG)
-      printf("%f,%f,%f,%f,%f,%f\r\n",gyro_x,gyro_y,gyro_z,accel_x,accel_y,accel_z);
-    // 以下为读取光电管的示例（从左到右编号0~11）
-    //  uint16_t mux_value;
-    //  MUX_get_value(&mux_value);
-    //  for(int i=0;i<=11;i++){
-    //    printf("%d,",MUX_GET_CHANNEL(mux_value,i));//获取第i个光电管的数值并输出
-    //  }
-    //  printf("\n");
+    Line_FollowStep();
+    HAL_Delay(LINE_PERIOD_MS);
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
   }
