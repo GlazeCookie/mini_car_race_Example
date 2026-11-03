@@ -38,6 +38,9 @@
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
 #define RUN_KEY_DEBOUNCE_MS 20U
 #define RUN_START_DELAY_MS  2000U
+/* 电机方向测试：各通道可单独设为 0，PWM 周期为 7200。 */
+#define MOTOR_TEST_LEFT_PWM  1000U
+#define MOTOR_TEST_RIGHT_PWM 1000U
 /* 循迹和速度参数均需根据电机、编码器和赛道实车标定。 */
 #define LINE_ACTIVE_LEVEL  0U
 #define LINE_MAX_ACTIVE    6U
@@ -171,6 +174,8 @@ int fputc(int ch, FILE *f)
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
+/* 暂停循迹及速度 PID，保留代码供电机测试后恢复。 */
+#if 0
 typedef struct
 {
   float integral;
@@ -282,8 +287,9 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
   TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
 }
+#endif
 
-/* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
+/* 发车键低电平按下；确认按下后等待 2 秒。 */
 static void WaitForRunKey(void)
 {
   for (;;)
@@ -331,7 +337,9 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+#if 0 /* 循迹控制暂时停用 */
   uint32_t last_control_tick;
+#endif
 
   /* USER CODE END 1 */
 
@@ -360,19 +368,25 @@ int main(void)
   MX_TIM3_Init();
   MX_USART3_UART_Init();
   MX_TIM4_Init();
-  if (HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL) != HAL_OK ||
-      HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL) != HAL_OK)
-    Error_Handler();
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   Init_brushless_motor(); //等待无刷电调负压启动完成
   /* USER CODE BEGIN 2 */
-  dodo_BMI270_init(); // 初始化陀螺仪
-  /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
+  /* 电机方向测试不依赖陀螺仪或编码器。 */
+#if 0 /* 循迹控制暂时停用 */
+  if (HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL) != HAL_OK ||
+      HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL) != HAL_OK)
+    Error_Handler();
+  dodo_BMI270_init(); /* 同时启用光电管延时所需的 DWT 计数器 */
+#endif
   WaitForRunKey();
+#if 0 /* 循迹控制暂时停用 */
   previous_left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   previous_right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
   last_control_tick = HAL_GetTick();
+#endif
+  TIM1->CCR1 = MOTOR_TEST_LEFT_PWM;
+  TIM1->CCR2 = MOTOR_TEST_RIGHT_PWM;
 
   /* USER CODE END 2 */
 
@@ -380,6 +394,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+#if 0 /* 循迹控制暂时停用 */
     uint32_t now = HAL_GetTick();
     uint32_t elapsed_ms = now - last_control_tick;
     if (elapsed_ms >= LINE_PERIOD_MS)
@@ -391,6 +406,8 @@ int main(void)
     {
       HAL_Delay(1U);
     }
+#endif
+    HAL_Delay(10U);
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
   }
