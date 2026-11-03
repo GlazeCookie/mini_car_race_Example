@@ -38,13 +38,21 @@
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
 #define RUN_KEY_DEBOUNCE_MS 20U
 #define RUN_START_DELAY_MS  2000U
-/* 循迹参数：线的有效电平、PWM 和增益均需根据实际硬件调整。 */
+/* 循迹和速度参数均需根据电机、编码器和赛道实车标定。 */
 #define LINE_ACTIVE_LEVEL  0U
-#define LINE_BASE_PWM      1000
-#define LINE_MAX_PWM       1800
-#define LINE_KP            80
 #define LINE_MAX_ACTIVE    6U
 #define LINE_PERIOD_MS     10U
+#define LINE_KP            80.0f   /* 每单位位置偏差对应的轮速修正，计数/秒 */
+#define SPEED_BASE_TARGET  1000.0f /* 直线目标轮速，编码器计数/秒 */
+#define SPEED_MAX_TARGET   2000.0f
+#define SPEED_FEEDFORWARD_PWM 1000.0f /* 基础目标轮速对应的估计 PWM */
+#define SPEED_MAX_PWM      1800.0f
+#define SPEED_KP           0.3f
+#define SPEED_KI           0.5f
+#define SPEED_KD           0.0002f
+#define SPEED_INTEGRAL_LIMIT 400.0f /* 积分项在 PWM 中的最大绝对贡献 */
+#define LEFT_ENCODER_SIGN  1
+#define RIGHT_ENCODER_SIGN (-1)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -163,11 +171,61 @@ int fputc(int ch, FILE *f)
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
-static int32_t Line_ClampPwm(int32_t pwm)
+typedef struct
 {
-  if (pwm < 0) return 0;
-  if (pwm > LINE_MAX_PWM) return LINE_MAX_PWM;
-  return pwm;
+  float integral;
+  float previous_error;
+  uint8_t has_previous_error;
+} SpeedPid;
+
+static SpeedPid left_speed_pid;
+static SpeedPid right_speed_pid;
+static uint16_t previous_left_count;
+static uint16_t previous_right_count;
+
+static float ClampFloat(float value, float minimum, float maximum)
+{
+  if (value < minimum) return minimum;
+  if (value > maximum) return maximum;
+  return value;
+}
+
+/* 16 位自由运行计数器的差值，允许单次采样间跨过一次回绕。 */
+static int32_t Encoder_Delta(uint16_t current, uint16_t previous)
+{
+  int32_t delta = (uint16_t)(current - previous);
+  if (delta > 32767) delta -= 65536;
+  return delta;
+}
+
+static void SpeedPid_Reset(SpeedPid *pid)
+{
+  pid->integral = 0.0f;
+  pid->previous_error = 0.0f;
+  pid->has_previous_error = 0U;
+}
+
+/* dt 为实际采样间隔（秒）；积分项限幅，并在输出饱和时抑制积分累积。 */
+static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float dt)
+{
+  float error = target - actual;
+  float derivative = pid->has_previous_error ? (error - pid->previous_error) / dt : 0.0f;
+  float candidate_integral = ClampFloat(pid->integral + SPEED_KI * error * dt,
+                                        -SPEED_INTEGRAL_LIMIT, SPEED_INTEGRAL_LIMIT);
+  float feedforward = SPEED_FEEDFORWARD_PWM * target / SPEED_BASE_TARGET;
+  float output = feedforward + SPEED_KP * error + candidate_integral + SPEED_KD * derivative;
+
+  if ((output <= SPEED_MAX_PWM || error < 0.0f) && (output >= 0.0f || error > 0.0f))
+  {
+    pid->integral = candidate_integral;
+  }
+  else
+  {
+    output = feedforward + SPEED_KP * error + pid->integral + SPEED_KD * derivative;
+  }
+  pid->previous_error = error;
+  pid->has_previous_error = 1U;
+  return (uint32_t)ClampFloat(output, 0.0f, SPEED_MAX_PWM);
 }
 
 /* 光电管从左到右编号 0~11，位置权重为 -11、-9、...、9、11。 */
@@ -194,21 +252,35 @@ static uint8_t Line_GetError(float *error)
   return 1U;
 }
 
-static void Line_FollowStep(void)
+static void Line_FollowStep(uint32_t elapsed_ms)
 {
   float error;
-  int32_t correction;
+  float correction;
+  float left_target;
+  float right_target;
+  float dt = (float)elapsed_ms / 1000.0f;
+  uint16_t left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  uint16_t right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+  float left_speed = (float)(Encoder_Delta(left_count, previous_left_count) * LEFT_ENCODER_SIGN) / dt;
+  float right_speed = (float)(Encoder_Delta(right_count, previous_right_count) * RIGHT_ENCODER_SIGN) / dt;
+
+  previous_left_count = left_count;
+  previous_right_count = right_count;
 
   if (!Line_GetError(&error))
   {
     TIM1->CCR1 = 0U;
     TIM1->CCR2 = 0U;
+    SpeedPid_Reset(&left_speed_pid);
+    SpeedPid_Reset(&right_speed_pid);
     return;
   }
 
-  correction = (int32_t)(LINE_KP * error);
-  TIM1->CCR1 = (uint32_t)Line_ClampPwm(LINE_BASE_PWM + correction);
-  TIM1->CCR2 = (uint32_t)Line_ClampPwm(LINE_BASE_PWM - correction);
+  correction = LINE_KP * error;
+  left_target = ClampFloat(SPEED_BASE_TARGET + correction, 0.0f, SPEED_MAX_TARGET);
+  right_target = ClampFloat(SPEED_BASE_TARGET - correction, 0.0f, SPEED_MAX_TARGET);
+  TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
+  TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
 }
 
 /* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
@@ -259,6 +331,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  uint32_t last_control_tick;
 
   /* USER CODE END 1 */
 
@@ -287,6 +360,9 @@ int main(void)
   MX_TIM3_Init();
   MX_USART3_UART_Init();
   MX_TIM4_Init();
+  if (HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL) != HAL_OK ||
+      HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL) != HAL_OK)
+    Error_Handler();
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   Init_brushless_motor(); //等待无刷电调负压启动完成
@@ -294,6 +370,9 @@ int main(void)
   dodo_BMI270_init(); // 初始化陀螺仪
   /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
   WaitForRunKey();
+  previous_left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  previous_right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+  last_control_tick = HAL_GetTick();
 
   /* USER CODE END 2 */
 
@@ -301,8 +380,17 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    Line_FollowStep();
-    HAL_Delay(LINE_PERIOD_MS);
+    uint32_t now = HAL_GetTick();
+    uint32_t elapsed_ms = now - last_control_tick;
+    if (elapsed_ms >= LINE_PERIOD_MS)
+    {
+      last_control_tick = now;
+      Line_FollowStep(elapsed_ms);
+    }
+    else
+    {
+      HAL_Delay(1U);
+    }
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
   }
