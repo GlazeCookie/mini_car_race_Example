@@ -36,22 +36,26 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 1 /* 1: 串口测试编码器、禁止电机输出；0: 循迹 */
+#define ENCODER_TEST_MODE 0 /* 1: 串口测试编码器、禁止电机输出；0: 循迹 */
 #define ENCODER_TEST_PERIOD_MS 200U
 #define RUN_KEY_DEBOUNCE_MS 20U
 #define RUN_START_DELAY_MS  2000U
 /* 循迹和速度参数均需根据电机、编码器和赛道实车标定。 */
-#define LINE_ACTIVE_LEVEL  0U
-#define LINE_MAX_ACTIVE    6U
+#define LINE_ACTIVE_LEVEL  1U /* 白线输出高电平 */
+#define LINE_MAX_ACTIVE    12U
 #define LINE_PERIOD_MS     10U
 #define LINE_KP            80.0f   /* 每单位位置偏差对应的轮速修正，计数/秒 */
-#define SPEED_BASE_TARGET  1000.0f /* 直线目标轮速，编码器计数/秒 */
-#define SPEED_MAX_TARGET   2000.0f
-#define SPEED_FEEDFORWARD_PWM 1000.0f /* 基础目标轮速对应的估计 PWM */
+#define LINE_KP2           2.0f    /* 偏差较大时增加转向修正，需实车调参 */
+#define LINE_KD            10.0f   /* 相邻采样偏差之差的系数，需实车调参 */
+#define LINE_SEARCH_PWM    600U    /* 丢线后单轮寻线 PWM，需实车调整 */
+#define LINE_SEARCH_TIME_MS 500U   /* 最长寻线时间，超过后停车 */
+#define SPEED_BASE_TARGET  1500.0f /* 直线目标轮速，编码器计数/秒 */
+#define SPEED_MAX_TARGET   2500.0f
+#define SPEED_FEEDFORWARD_PWM 1500.0f /* 基础目标轮速对应的估计 PWM */
 #define SPEED_MAX_PWM      1800.0f
 #define SPEED_KP           0.3f
-#define SPEED_KI           0.5f
-#define SPEED_KD           0.0002f
+#define SPEED_KI           0.0f
+#define SPEED_KD           0.0f
 #define SPEED_INTEGRAL_LIMIT 400.0f /* 积分项在 PWM 中的最大绝对贡献 */
 #define LEFT_ENCODER_SIGN  1
 #define RIGHT_ENCODER_SIGN (-1)
@@ -184,6 +188,19 @@ static SpeedPid left_speed_pid;
 static SpeedPid right_speed_pid;
 static uint16_t previous_left_count;
 static uint16_t previous_right_count;
+static int8_t last_line_direction; /* -1 左，1 右，0 无法判断 */
+static uint8_t line_lost;
+static uint8_t line_search_expired;
+static uint32_t line_lost_tick;
+static float previous_line_error;
+static uint8_t has_previous_line_error;
+
+typedef enum
+{
+  LINE_LOST,
+  LINE_FOUND,
+  LINE_TOO_WIDE
+} LineStatus;
 
 static float ClampFloat(float value, float minimum, float maximum)
 {
@@ -231,7 +248,7 @@ static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float
 }
 
 /* 光电管从左到右编号 0~11，位置权重为 -11、-9、...、9、11。 */
-static uint8_t Line_GetError(float *error)
+static LineStatus Line_GetError(float *error)
 {
   uint16_t mux_value;
   int32_t position_sum = 0;
@@ -248,10 +265,10 @@ static uint8_t Line_GetError(float *error)
     }
   }
 
-  /* 丢线或检测区域过宽时停车；阈值需要按赛道调整。 */
-  if (active_count == 0U || active_count > LINE_MAX_ACTIVE) return 0U;
+  if (active_count == 0U) return LINE_LOST;
+  if (active_count > LINE_MAX_ACTIVE) return LINE_TOO_WIDE;
   *error = (float)position_sum / active_count;
-  return 1U;
+  return LINE_FOUND;
 }
 
 static void Line_FollowStep(uint32_t elapsed_ms)
@@ -260,6 +277,8 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   float correction;
   float left_target;
   float right_target;
+  float error_difference;
+  LineStatus line_status;
   float dt = (float)elapsed_ms / 1000.0f;
   uint16_t left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   uint16_t right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
@@ -269,16 +288,49 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   previous_left_count = left_count;
   previous_right_count = right_count;
 
-  if (!Line_GetError(&error))
+  line_status = Line_GetError(&error);
+  if (line_status != LINE_FOUND)
   {
-    TIM1->CCR1 = 0U;
-    TIM1->CCR2 = 0U;
+    uint32_t now = HAL_GetTick();
+
     SpeedPid_Reset(&left_speed_pid);
     SpeedPid_Reset(&right_speed_pid);
+    has_previous_line_error = 0U;
+
+    /* 检测范围过宽时不猜测方向，立即停车。 */
+    if (line_status == LINE_TOO_WIDE)
+    {
+      last_line_direction = 0;
+      line_lost = 0U;
+      line_search_expired = 0U;
+    }
+    else if (!line_lost)
+    {
+      line_lost = 1U;
+      line_lost_tick = now;
+      line_search_expired = (last_line_direction == 0);
+    }
+
+    if (line_lost && !line_search_expired &&
+        (uint32_t)(now - line_lost_tick) >= LINE_SEARCH_TIME_MS)
+      line_search_expired = 1U;
+
+    /* 单轮低速前进，另一轮停转；方向未知、超时或过宽时都停车。 */
+    TIM1->CCR1 = (line_status == LINE_LOST && !line_search_expired && last_line_direction > 0)
+                 ? LINE_SEARCH_PWM : 0U;
+    TIM1->CCR2 = (line_status == LINE_LOST && !line_search_expired && last_line_direction < 0)
+                 ? LINE_SEARCH_PWM : 0U;
     return;
   }
 
-  correction = LINE_KP * error;
+  line_lost = 0U;
+  line_search_expired = 0U;
+  last_line_direction = (error > 0.0f) ? 1 : ((error < 0.0f) ? -1 : 0);
+  error_difference = has_previous_line_error ? error - previous_line_error : 0.0f;
+  previous_line_error = error;
+  has_previous_line_error = 1U;
+  correction = LINE_KP * error + LINE_KP2 * error * ((error < 0.0f) ? -error : error)
+               + LINE_KD * error_difference;
   left_target = ClampFloat(SPEED_BASE_TARGET + correction, 0.0f, SPEED_MAX_TARGET);
   right_target = ClampFloat(SPEED_BASE_TARGET - correction, 0.0f, SPEED_MAX_TARGET);
   TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
