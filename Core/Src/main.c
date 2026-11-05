@@ -26,6 +26,7 @@
 #include "dodo_BMI270.h" //陀螺仪驱动
 #include "multiplexer.h" //多路复用器驱动，用于读取光电管读数
 #include "stdio.h"
+#include "pid_helper_app.h" //PID Helper 上位机调参协议（USART3）
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,19 +49,32 @@
 #define LINE_ACTIVE_LEVEL  1U /* 白线输出高电平 */
 #define LINE_MAX_ACTIVE    12U
 #define LINE_PERIOD_MS     10U
-#define LINE_KP            80.0f   /* 每单位位置偏差对应的轮速修正，计数/秒 */
-#define LINE_KP2           2.0f    /* 偏差较大时增加转向修正，需实车调参 */
-#define LINE_KD            10.0f   /* 相邻采样偏差之差的系数，需实车调参 */
+/* 转向修正系数随基准速度等比放大（2500 -> 20000 是 ×8）。
+   若不同步放大，同样的位置偏差只能产生 1/8 的轮速差，车会跑得很快但不转弯。 */
+#define LINE_KP            640.0f  /* 每单位位置偏差对应的轮速修正，计数/秒 */
+#define LINE_KP2           16.0f   /* 偏差较大时增加转向修正，需实车调参 */
+#define LINE_KD            80.0f   /* 相邻采样偏差之差的系数，需实车调参 */
 #define LINE_SEARCH_PWM    600U    /* 丢线后单轮寻线 PWM，需实车调整 */
 #define LINE_SEARCH_TIME_MS 500U   /* 最长寻线时间，超过后停车 */
-#define SPEED_BASE_TARGET  1500.0f /* 直线目标轮速，编码器计数/秒 */
-#define SPEED_MAX_TARGET   2500.0f
-#define SPEED_FEEDFORWARD_PWM 1500.0f /* 基础目标轮速对应的估计 PWM */
-#define SPEED_MAX_PWM      1800.0f
-#define SPEED_KP           0.3f
-#define SPEED_KI           0.0f
+/* 实测每米约 19841 计数（左轮，人工推车 1 米标定）：
+     0.5 m/s ≈ 10000 计数/秒，1.0 m/s ≈ 20000，1.5 m/s ≈ 30000
+   原来的 2500 只有 0.13 m/s，整条速度标尺小了约 8 倍。 */
+#define SPEED_BASE_TARGET  12000.0f /* 直线目标轮速 ≈ 0.60 m/s */
+#define SPEED_MAX_TARGET   22000.0f /* 留足转向修正量：12000 + 最大修正 ≈ 21000 */
+/* 前馈 = 死区补偿 + 斜率 × 目标速度（只有目标 > 0 时才生效）：
+     SPEED_FF_OFFSET 负责一上来就跨过电机静摩擦死区，让车立刻动；
+     SPEED_FF_GAIN 是「每 1 计数/秒 需要多少 PWM」，由开环辨识得出 1/125。
+   注意 OFFSET 是带载后的估计值，实车标定时可按表现上调。 */
+#define SPEED_FF_OFFSET    300.0f  /* 死区补偿 PWM */
+#define SPEED_FF_GAIN      0.008f  /* PWM / (计数每秒) */
+#define SPEED_MAX_PWM      4000.0f
+/* 以下增益由开环辨识 + 闭环阶跃搜索实测得出（空载，轮子悬空）：
+     目标 20000~30000 计数/秒：静差 1.1~1.4%，超调 0.9~2.7%，上升 ~170ms
+   注意：这是空载特性，上车带载后增益可按需再提高。 */
+#define SPEED_KP           0.0012f
+#define SPEED_KI           0.08f
 #define SPEED_KD           0.0f
-#define SPEED_INTEGRAL_LIMIT 400.0f /* 积分项在 PWM 中的最大绝对贡献 */
+#define SPEED_INTEGRAL_LIMIT 1000.0f /* 积分项在 PWM 中的最大绝对贡献 */
 #define LEFT_ENCODER_SIGN  1
 #define RIGHT_ENCODER_SIGN (-1)
 /* USER CODE END PD */
@@ -223,6 +237,7 @@ typedef struct
 } LineTelemetry;
 
 static LineTelemetry line_telemetry;
+#if !PID_HELPER_ENABLE
 /* 发送完成前 HAL 会继续读取此缓冲区，因此必须保持有效且不能覆盖。 */
 static char line_telemetry_buffer[160];
 
@@ -243,6 +258,7 @@ static void Line_SendTelemetry(void)
   if (length > 0 && (unsigned int)length < sizeof(line_telemetry_buffer))
     (void)HAL_UART_Transmit_IT(&huart3, (uint8_t *)line_telemetry_buffer, (uint16_t)length);
 }
+#endif /* !PID_HELPER_ENABLE */
 #endif
 
 static float ClampFloat(float value, float minimum, float maximum)
@@ -272,10 +288,11 @@ static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float
 {
   float error = target - actual;
   float derivative = pid->has_previous_error ? (error - pid->previous_error) / dt : 0.0f;
-  float candidate_integral = ClampFloat(pid->integral + SPEED_KI * error * dt,
+  float candidate_integral = ClampFloat(pid->integral + PidHelper_Ki() * error * dt,
                                         -SPEED_INTEGRAL_LIMIT, SPEED_INTEGRAL_LIMIT);
-  float feedforward = SPEED_FEEDFORWARD_PWM * target / SPEED_BASE_TARGET;
-  float output = feedforward + SPEED_KP * error + candidate_integral + SPEED_KD * derivative;
+  /* 死区补偿 + 斜率前馈：目标为 0 时不加，避免停车时轮子还在爬 */
+  float feedforward = (target > 0.0f) ? (SPEED_FF_OFFSET + SPEED_FF_GAIN * target) : 0.0f;
+  float output = feedforward + PidHelper_Kp() * error + candidate_integral + PidHelper_Kd() * derivative;
 
   if ((output <= SPEED_MAX_PWM || error < 0.0f) && (output >= 0.0f || error > 0.0f))
   {
@@ -283,7 +300,7 @@ static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float
   }
   else
   {
-    output = feedforward + SPEED_KP * error + pid->integral + SPEED_KD * derivative;
+    output = feedforward + PidHelper_Kp() * error + pid->integral + PidHelper_Kd() * derivative;
   }
   pid->previous_error = error;
   pid->has_previous_error = 1U;
@@ -342,6 +359,32 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   line_telemetry.left_speed = (int32_t)left_speed;
   line_telemetry.right_speed = (int32_t)right_speed;
 #endif
+#if PID_HELPER_ENABLE
+  /* 上位机接管：跳过循迹，两轮以上位机下发的同一目标速度跑同一个速度环 */
+  if (PidHelper_IsTuning())
+  {
+    uint32_t left_pwm;
+    uint32_t right_pwm;
+    float pid_target = 0.0f;
+
+    if (PidHelper_IsOpenMode())
+    {
+      left_pwm = (uint32_t)PidHelper_OpenOutput();
+      right_pwm = left_pwm;
+    }
+    else
+    {
+      pid_target = PidHelper_TargetSpeed();
+      left_pwm = SpeedPid_Update(&left_speed_pid, pid_target, left_speed, dt);
+      right_pwm = SpeedPid_Update(&right_speed_pid, pid_target, right_speed, dt);
+    }
+
+    TIM1->CCR1 = left_pwm;
+    TIM1->CCR2 = right_pwm;
+    PidHelper_Report(left_speed, pid_target, (float)left_pwm);
+    return;
+  }
+#endif
   if (line_status != LINE_FOUND)
   {
     uint32_t now = HAL_GetTick();
@@ -382,6 +425,7 @@ static void Line_FollowStep(uint32_t elapsed_ms)
     line_telemetry.left_pwm = TIM1->CCR1;
     line_telemetry.right_pwm = TIM1->CCR2;
 #endif
+    PidHelper_Report(left_speed, 0.0f, (float)TIM1->CCR1);
     return;
   }
 
@@ -405,6 +449,7 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   line_telemetry.left_pwm = TIM1->CCR1;
   line_telemetry.right_pwm = TIM1->CCR2;
 #endif
+  PidHelper_Report(left_speed, left_target, (float)TIM1->CCR1);
 }
 
 /* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
@@ -412,6 +457,14 @@ static void WaitForRunKey(void)
 {
   for (;;)
   {
+#if PID_HELPER_ENABLE
+    /* 上位机接管时不必等发车键；这里同时保持命令接收和遥测在线 */
+    PidHelper_Poll();
+    if (PidHelper_IsTuning())
+    {
+      return;
+    }
+#endif
     if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET)
     {
       HAL_Delay(RUN_KEY_DEBOUNCE_MS);
@@ -498,6 +551,10 @@ int main(void)
   Init_brushless_motor(); //等待无刷电调负压启动完成
 #endif
   /* USER CODE BEGIN 2 */
+  /* PID Helper 调参协议挂在 USART3（PB10/PB11）；默认增益取编译期参数。
+     第 5 个参数是调参时允许的目标速度上限，单独给 30000，不改动循迹用的
+     SPEED_MAX_TARGET（那个宏循迹逻辑还在用）。 */
+  PidHelper_Init(&huart3, SPEED_KP, SPEED_KI, SPEED_KD, 30000.0f, SPEED_MAX_PWM);
 #if ENCODER_TEST_MODE != 1
   dodo_BMI270_init(); // 初始化陀螺仪
   /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
@@ -551,7 +608,10 @@ int main(void)
       if ((uint32_t)(now - last_telemetry_tick) >= LINE_TELEMETRY_PERIOD_MS)
       {
         last_telemetry_tick = now;
+#if !PID_HELPER_ENABLE
+        /* 调参协议占用同一个串口时，CSV 文本输出必须让位，否则会把协议帧打乱 */
         Line_SendTelemetry();
+#endif
       }
 #endif
     }
@@ -562,6 +622,7 @@ int main(void)
 #endif
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
+    PidHelper_Poll(); /* 20 ms 一帧遥测 + 串口接收兜底 */
   }
   /* USER CODE END 3 */
 }
