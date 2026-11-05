@@ -8,6 +8,24 @@ static SPI_HandleTypeDef *bmi2_hspi = NULL;
 
 static volatile uint8_t spi_dma_tx_rx_complete = 0;
 
+/* 有上限地等待 DMA 完成。
+   原来的 while (spi_dma_tx_rx_complete == 0) {} 没有超时：SPI 一旦没响应
+   （排线松动、干扰、模块掉电），主循环会永久卡死，电机带着最后的 PWM 一直转。
+   现在最多等 timeout_ms，超时就中止传输并返回错误，上层会把数据标记为无效。 */
+#define BMI270_DMA_TIMEOUT_MS 5u
+
+static int bmi270_wait_dma(uint32_t timeout_ms)
+{
+    uint32_t start = HAL_GetTick();
+
+    while (spi_dma_tx_rx_complete == 0) {
+        if ((uint32_t)(HAL_GetTick() - start) > timeout_ms) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /**
  * @brief SPI 读函数 (DMA)
  */
@@ -36,7 +54,11 @@ BMI2_INTF_RETURN_TYPE bmi2_spi_read(uint8_t reg_addr, uint8_t *reg_data, uint32_
         return BMI2_E_COM_FAIL;
     }
 
-    while (spi_dma_tx_rx_complete == 0) {}
+    if (bmi270_wait_dma(BMI270_DMA_TIMEOUT_MS) != 0) {
+        (void)HAL_SPI_Abort(bmi2_hspi);
+        BMI270_CS_HIGH();
+        return BMI2_E_COM_FAIL;
+    }
 
     BMI270_CS_HIGH();
     
@@ -78,7 +100,11 @@ BMI2_INTF_RETURN_TYPE bmi2_spi_write(uint8_t reg_addr, const uint8_t *reg_data, 
     }else{
     }
 
-    while (spi_dma_tx_rx_complete == 0) {}
+    if (bmi270_wait_dma(BMI270_DMA_TIMEOUT_MS) != 0) {
+        (void)HAL_SPI_Abort(bmi2_hspi);
+        BMI270_CS_HIGH();
+        return BMI2_E_COM_FAIL;
+    }
 
     BMI270_CS_HIGH();
 

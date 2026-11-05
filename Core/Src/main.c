@@ -27,6 +27,7 @@
 #include "multiplexer.h" //多路复用器驱动，用于读取光电管读数
 #include "stdio.h"
 #include "pid_helper_app.h" //PID Helper 上位机调参协议（USART3）
+#include "telemetry_stream.h" //双轮编码器 + 陀螺仪数据流（USART3，与调参互斥）
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -49,30 +50,40 @@
 #define LINE_ACTIVE_LEVEL  1U /* 白线输出高电平 */
 #define LINE_MAX_ACTIVE    12U
 #define LINE_PERIOD_MS     10U
-/* 转向修正系数随基准速度等比放大（2500 -> 20000 是 ×8）。
-   若不同步放大，同样的位置偏差只能产生 1/8 的轮速差，车会跑得很快但不转弯。 */
-#define LINE_KP            640.0f  /* 每单位位置偏差对应的轮速修正，计数/秒 */
-#define LINE_KP2           16.0f   /* 偏差较大时增加转向修正，需实车调参 */
-#define LINE_KD            80.0f   /* 相邻采样偏差之差的系数，需实车调参 */
-#define LINE_SEARCH_PWM    600U    /* 丢线后单轮寻线 PWM，需实车调整 */
-#define LINE_SEARCH_TIME_MS 500U   /* 最长寻线时间，超过后停车 */
+/* 转向修正系数随基准速度等比放大（2500 -> 12000 是 ×4.8），再针对折线急弯加强：
+   修正量 = LINE_KP×e + LINE_KP2×e×|e| + LINE_KD×Δe
+   基准 12000 时，修正量必须能超过 12000，内侧轮才可能降到 0（绕内轮支点急转）。
+   取 KP=700 / KP2=60：e=10 时修正 13000 -> 内侧轮归零；e=1 时只有 760（直道不画龙）。 */
+#define LINE_KP            700.0f  /* 每单位位置偏差对应的轮速修正，计数/秒 */
+#define LINE_KP2           60.0f   /* 大偏差时的二次加强，急弯靠它把内侧轮压到 0 */
+#define LINE_KD            80.0f   /* 相邻采样偏差之差的系数，抑制画龙 */
+/* 丢线后单轮寻线的 PWM。必须和巡航速度匹配：
+   带载 PWM = 200 + 0.010×转速，600 PWM 约等于 2.0 m/s，单轮转起来车体
+   角速度接近 950°/s，一找到线车头已经转过头了，表现为"跑反方向"。
+   降到 300 PWM ≈ 0.5 m/s，寻线时慢慢转，找到线能及时停下。 */
+#define LINE_SEARCH_PWM    300U    /* 丢线后单轮寻线 PWM，需实车调整 */
+/* 寻线时间随车速提高而延长：基准速度从 2500 提到 12000（约 4.8 倍）。
+   原来 500ms 在 0.13 m/s 下够用，但 0.6 m/s 时 0.5 秒已冲出 30cm，
+   超过就会双轮停死、再也恢复不了（环岛卡住就是这么来的）。 */
+#define LINE_SEARCH_TIME_MS 2000U  /* 最长寻线时间，超过后停车 */
 /* 实测每米约 19841 计数（左轮，人工推车 1 米标定）：
      0.5 m/s ≈ 10000 计数/秒，1.0 m/s ≈ 20000，1.5 m/s ≈ 30000
    原来的 2500 只有 0.13 m/s，整条速度标尺小了约 8 倍。 */
-#define SPEED_BASE_TARGET  12000.0f /* 直线目标轮速 ≈ 0.60 m/s */
-#define SPEED_MAX_TARGET   22000.0f /* 留足转向修正量：12000 + 最大修正 ≈ 21000 */
-/* 前馈 = 死区补偿 + 斜率 × 目标速度（只有目标 > 0 时才生效）：
-     SPEED_FF_OFFSET 负责一上来就跨过电机静摩擦死区，让车立刻动；
-     SPEED_FF_GAIN 是「每 1 计数/秒 需要多少 PWM」，由开环辨识得出 1/125。
-   注意 OFFSET 是带载后的估计值，实车标定时可按表现上调。 */
-#define SPEED_FF_OFFSET    300.0f  /* 死区补偿 PWM */
-#define SPEED_FF_GAIN      0.008f  /* PWM / (计数每秒) */
+#define SPEED_BASE_TARGET  14000.0f /* 直线目标轮速 ≈ 0.71 m/s */
+#define SPEED_MAX_TARGET   29000.0f /* 留足转向修正量：14000 + 最大修正 ≈ 29000 */
+/* 前馈 = 死区补偿 + 斜率 × 目标速度（只有目标 > 0 时才生效）。
+   实测带载巡航：目标 12000 时稳态 PWM ≈ 322，据此反算
+     FF(12000) = 200 + 0.010 × 12000 = 320 ≈ 322  ✓
+   这样巡航时积分器几乎不工作；弯道里内侧轮目标骤降时前馈能立刻跟着掉，
+   内侧轮才压得下来、差速才够（原来 OFFSET=300 太大，内侧轮压不下去，弯道往外推）。 */
+#define SPEED_FF_OFFSET    200.0f  /* 死区补偿 PWM */
+#define SPEED_FF_GAIN      0.010f  /* PWM / (计数每秒) */
 #define SPEED_MAX_PWM      4000.0f
 /* 以下增益由开环辨识 + 闭环阶跃搜索实测得出（空载，轮子悬空）：
      目标 20000~30000 计数/秒：静差 1.1~1.4%，超调 0.9~2.7%，上升 ~170ms
    注意：这是空载特性，上车带载后增益可按需再提高。 */
 #define SPEED_KP           0.0012f
-#define SPEED_KI           0.08f
+#define SPEED_KI           0.07f
 #define SPEED_KD           0.0f
 #define SPEED_INTEGRAL_LIMIT 1000.0f /* 积分项在 PWM 中的最大绝对贡献 */
 #define LEFT_ENCODER_SIGN  1
@@ -207,6 +218,10 @@ static SpeedPid right_speed_pid;
 static uint16_t previous_left_count;
 static uint16_t previous_right_count;
 static int8_t last_line_direction; /* -1 左，1 右，0 无法判断 */
+/* 最近一次"明确"的方向：只在误差非 0 时更新，永不清零。
+   连续弯道后车常常在正中间丢线，此时 last_line_direction 恰好是 0，
+   原来的代码会立刻判定"方向未知、寻线超时"而永久停死。用它兜底。 */
+static int8_t last_valid_direction;
 static uint8_t line_lost;
 static uint8_t line_search_expired;
 static uint32_t line_lost_tick;
@@ -237,7 +252,7 @@ typedef struct
 } LineTelemetry;
 
 static LineTelemetry line_telemetry;
-#if !PID_HELPER_ENABLE
+#if !PID_HELPER_ENABLE && !TELEMETRY_STREAM_ENABLE
 /* 发送完成前 HAL 会继续读取此缓冲区，因此必须保持有效且不能覆盖。 */
 static char line_telemetry_buffer[160];
 
@@ -258,7 +273,7 @@ static void Line_SendTelemetry(void)
   if (length > 0 && (unsigned int)length < sizeof(line_telemetry_buffer))
     (void)HAL_UART_Transmit_IT(&huart3, (uint8_t *)line_telemetry_buffer, (uint16_t)length);
 }
-#endif /* !PID_HELPER_ENABLE */
+#endif /* !PID_HELPER_ENABLE && !TELEMETRY_STREAM_ENABLE */
 #endif
 
 static float ClampFloat(float value, float minimum, float maximum)
@@ -343,6 +358,11 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   float left_target;
   float right_target;
   float error_difference;
+  float abs_error;
+  float abs_error_diff;
+  float severity;
+  float speed_scale;
+  float base_speed;
   LineStatus line_status;
   float dt = (float)elapsed_ms / 1000.0f;
   uint16_t left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
@@ -388,10 +408,16 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   if (line_status != LINE_FOUND)
   {
     uint32_t now = HAL_GetTick();
+    int8_t search_dir;
 
     SpeedPid_Reset(&left_speed_pid);
     SpeedPid_Reset(&right_speed_pid);
+
     has_previous_line_error = 0U;
+
+    /* 丢线时要往哪边找：优先用当前方向，当前正好在中间（误差=0）就用最近一次
+       明确的方向兜底。否则连续弯道后在中间丢线会直接判"方向未知"永久停死。 */
+    search_dir = (last_line_direction != 0) ? last_line_direction : last_valid_direction;
 
     /* 检测范围过宽时不猜测方向，立即停车。 */
     if (line_status == LINE_TOO_WIDE)
@@ -404,17 +430,17 @@ static void Line_FollowStep(uint32_t elapsed_ms)
     {
       line_lost = 1U;
       line_lost_tick = now;
-      line_search_expired = (last_line_direction == 0);
+      line_search_expired = (search_dir == 0);
     }
 
     if (line_lost && !line_search_expired &&
         (uint32_t)(now - line_lost_tick) >= LINE_SEARCH_TIME_MS)
       line_search_expired = 1U;
 
-    /* 单轮低速前进，另一轮停转；方向未知、超时或过宽时都停车。 */
-    TIM1->CCR1 = (line_status == LINE_LOST && !line_search_expired && last_line_direction > 0)
+    /* 单轮低速前进，另一轮停转；只有真的从没见过方向才停车。 */
+    TIM1->CCR1 = (line_status == LINE_LOST && !line_search_expired && search_dir > 0)
                  ? LINE_SEARCH_PWM : 0U;
-    TIM1->CCR2 = (line_status == LINE_LOST && !line_search_expired && last_line_direction < 0)
+    TIM1->CCR2 = (line_status == LINE_LOST && !line_search_expired && search_dir < 0)
                  ? LINE_SEARCH_PWM : 0U;
 #if ENCODER_TEST_MODE == 2
     line_telemetry.state = (line_status == LINE_TOO_WIDE) ? 'W' :
@@ -432,13 +458,29 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   line_lost = 0U;
   line_search_expired = 0U;
   last_line_direction = (error > 0.0f) ? 1 : ((error < 0.0f) ? -1 : 0);
+  if (last_line_direction != 0) last_valid_direction = last_line_direction;
   error_difference = has_previous_line_error ? error - previous_line_error : 0.0f;
   previous_line_error = error;
   has_previous_line_error = 1U;
-  correction = LINE_KP * error + LINE_KP2 * error * ((error < 0.0f) ? -error : error)
-               + LINE_KD * error_difference;
-  left_target = ClampFloat(SPEED_BASE_TARGET + correction, 0.0f, SPEED_MAX_TARGET);
-  right_target = ClampFloat(SPEED_BASE_TARGET - correction, 0.0f, SPEED_MAX_TARGET);
+  abs_error = (error < 0.0f) ? -error : error;
+  correction = LINE_KP * error + LINE_KP2 * error * abs_error + LINE_KD * error_difference;
+
+  /* 弯道减速：偏差越大，两侧基础速度一起降（差速不变）。
+     差速决定转向的角速度，基础速度决定前进速度；只降前进速度就能减小转弯半径。
+     除了看偏差大小，还看偏差"变化多快"：压到直角弯口时偏差会突然跳变，
+     这一下就要收油，否则等偏差涨到最大再减速，车头已经过弯口了（0.7 m/s 下
+     轮子减速要 ~200ms，这 200ms 车已经前进 14cm）。 */
+  abs_error_diff = (error_difference < 0.0f) ? -error_difference : error_difference;
+  severity = abs_error;
+  if (abs_error_diff * 2.5f > severity) severity = abs_error_diff * 2.5f;
+
+  speed_scale = 1.0f - 0.16f * (severity - 3.0f);
+  if (speed_scale > 1.0f) speed_scale = 1.0f;
+  if (speed_scale < 0.22f) speed_scale = 0.22f; /* 最慢降到 0.22 倍 ≈ 0.16 m/s */
+  base_speed = SPEED_BASE_TARGET * speed_scale;
+
+  left_target = ClampFloat(base_speed + correction, 0.0f, SPEED_MAX_TARGET);
+  right_target = ClampFloat(base_speed - correction, 0.0f, SPEED_MAX_TARGET);
   TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
   TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
 #if ENCODER_TEST_MODE == 2
@@ -457,6 +499,8 @@ static void WaitForRunKey(void)
 {
   for (;;)
   {
+    /* 上电就开始发遥测：不按发车键也能架空轮子做静态验证（此时电机不动） */
+    TelemetryStream_Poll();
 #if PID_HELPER_ENABLE
     /* 上位机接管时不必等发车键；这里同时保持命令接收和遥测在线 */
     PidHelper_Poll();
@@ -551,6 +595,9 @@ int main(void)
   Init_brushless_motor(); //等待无刷电调负压启动完成
 #endif
   /* USER CODE BEGIN 2 */
+  /* 双轮编码器 + BMI270 陀螺仪数据流，20 Hz。与 PID Helper 互斥（都占 USART3），
+     由 telemetry_stream.h 里的 TELEMETRY_STREAM_ENABLE 选择用哪个。 */
+  TelemetryStream_Init(&huart3, LEFT_ENCODER_SIGN, RIGHT_ENCODER_SIGN);
   /* PID Helper 调参协议挂在 USART3（PB10/PB11）；默认增益取编译期参数。
      第 5 个参数是调参时允许的目标速度上限，单独给 30000，不改动循迹用的
      SPEED_MAX_TARGET（那个宏循迹逻辑还在用）。 */
@@ -608,8 +655,8 @@ int main(void)
       if ((uint32_t)(now - last_telemetry_tick) >= LINE_TELEMETRY_PERIOD_MS)
       {
         last_telemetry_tick = now;
-#if !PID_HELPER_ENABLE
-        /* 调参协议占用同一个串口时，CSV 文本输出必须让位，否则会把协议帧打乱 */
+#if !PID_HELPER_ENABLE && !TELEMETRY_STREAM_ENABLE
+        /* 调参协议或数据流占用同一个串口时，CSV 文本输出必须让位 */
         Line_SendTelemetry();
 #endif
       }
@@ -623,6 +670,7 @@ int main(void)
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
     PidHelper_Poll(); /* 20 ms 一帧遥测 + 串口接收兜底 */
+    TelemetryStream_Poll(); /* 50 ms 一帧：双轮增量 + 陀螺仪三轴 */
   }
   /* USER CODE END 3 */
 }

@@ -29,7 +29,13 @@
  * 1: 用 USART3 跑 PID 调参协议。此时原来 100 ms 一行的 CSV 文本调试输出会自动关闭，
  *    因为两种数据混在同一个串口上会把协议帧打乱。
  * 0: 完全恢复原样（CSV 调试输出照旧），调参协议不启用。
+ *
+ * 注意：telemetry_stream.h 里若把 TELEMETRY_STREAM_ENABLE 置 1，
+ * 它会把 PID_HELPER_ENABLE 强制改成 0（两者共用 USART3，必须二选一）。
+ * 这里先包含它，保证本文件与 pid_helper_app.c 都看到同一份开关。
  */
+#include "telemetry_stream.h"
+
 #ifndef PID_HELPER_ENABLE
 #define PID_HELPER_ENABLE 1
 #endif

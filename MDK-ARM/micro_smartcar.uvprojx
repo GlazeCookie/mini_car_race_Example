@@ -593,6 +593,21 @@
           </Files>
         </Group>
         <Group>
+          <GroupName>Telemetry</GroupName>
+          <Files>
+            <File>
+              <FileName>telemetry_stream.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\code\telemetry_stream.h</FilePath>
+            </File>
+            <File>
+              <FileName>telemetry_stream.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\code\telemetry_stream.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
           <GroupName>::CMSIS</GroupName>
         </Group>
       </Groups>
