@@ -36,8 +36,12 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 0 /* 1: 串口测试编码器、禁止电机输出；0: 循迹 */
+#define ENCODER_TEST_MODE 2 /* 0: 循迹；1: 编码器测试；2: 循迹并发送实时数据 */
 #define ENCODER_TEST_PERIOD_MS 200U
+#define LINE_TELEMETRY_PERIOD_MS 100U
+#if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 2
+#error "ENCODER_TEST_MODE must be 0, 1 or 2"
+#endif
 #define RUN_KEY_DEBOUNCE_MS 20U
 #define RUN_START_DELAY_MS  2000U
 /* 循迹和速度参数均需根据电机、编码器和赛道实车标定。 */
@@ -202,6 +206,45 @@ typedef enum
   LINE_TOO_WIDE
 } LineStatus;
 
+#if ENCODER_TEST_MODE == 2
+typedef struct
+{
+  uint32_t sample_tick;
+  uint16_t mux_value;
+  uint8_t active_count;
+  char state; /* F=循迹, S=寻线, X=丢线停车, W=检测过宽 */
+  int32_t error_x100;
+  int32_t left_speed;
+  int32_t right_speed;
+  int32_t left_target;
+  int32_t right_target;
+  uint32_t left_pwm;
+  uint32_t right_pwm;
+} LineTelemetry;
+
+static LineTelemetry line_telemetry;
+/* 发送完成前 HAL 会继续读取此缓冲区，因此必须保持有效且不能覆盖。 */
+static char line_telemetry_buffer[160];
+
+static void Line_SendTelemetry(void)
+{
+  int length;
+  if (HAL_UART_GetState(&huart3) != HAL_UART_STATE_READY) return;
+
+  length = snprintf(line_telemetry_buffer, sizeof(line_telemetry_buffer),
+                    "%lu,%c,%03X,%u,%ld,%ld,%ld,%ld,%ld,%lu,%lu\r\n",
+                    (unsigned long)line_telemetry.sample_tick,
+                    line_telemetry.state, (unsigned int)line_telemetry.mux_value,
+                    (unsigned int)line_telemetry.active_count,
+                    (long)line_telemetry.error_x100,
+                    (long)line_telemetry.left_speed, (long)line_telemetry.right_speed,
+                    (long)line_telemetry.left_target, (long)line_telemetry.right_target,
+                    (unsigned long)line_telemetry.left_pwm, (unsigned long)line_telemetry.right_pwm);
+  if (length > 0 && (unsigned int)length < sizeof(line_telemetry_buffer))
+    (void)HAL_UART_Transmit_IT(&huart3, (uint8_t *)line_telemetry_buffer, (uint16_t)length);
+}
+#endif
+
 static float ClampFloat(float value, float minimum, float maximum)
 {
   if (value < minimum) return minimum;
@@ -265,6 +308,11 @@ static LineStatus Line_GetError(float *error)
     }
   }
 
+#if ENCODER_TEST_MODE == 2
+  line_telemetry.mux_value = mux_value;
+  line_telemetry.active_count = active_count;
+#endif
+
   if (active_count == 0U) return LINE_LOST;
   if (active_count > LINE_MAX_ACTIVE) return LINE_TOO_WIDE;
   *error = (float)position_sum / active_count;
@@ -289,6 +337,11 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   previous_right_count = right_count;
 
   line_status = Line_GetError(&error);
+#if ENCODER_TEST_MODE == 2
+  line_telemetry.sample_tick = HAL_GetTick();
+  line_telemetry.left_speed = (int32_t)left_speed;
+  line_telemetry.right_speed = (int32_t)right_speed;
+#endif
   if (line_status != LINE_FOUND)
   {
     uint32_t now = HAL_GetTick();
@@ -320,6 +373,15 @@ static void Line_FollowStep(uint32_t elapsed_ms)
                  ? LINE_SEARCH_PWM : 0U;
     TIM1->CCR2 = (line_status == LINE_LOST && !line_search_expired && last_line_direction < 0)
                  ? LINE_SEARCH_PWM : 0U;
+#if ENCODER_TEST_MODE == 2
+    line_telemetry.state = (line_status == LINE_TOO_WIDE) ? 'W' :
+                           (line_search_expired ? 'X' : 'S');
+    line_telemetry.error_x100 = 0; /* 无有效偏差，须结合状态判断 */
+    line_telemetry.left_target = 0; /* 寻线时直接输出 PWM，不使用速度目标 */
+    line_telemetry.right_target = 0;
+    line_telemetry.left_pwm = TIM1->CCR1;
+    line_telemetry.right_pwm = TIM1->CCR2;
+#endif
     return;
   }
 
@@ -335,6 +397,14 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   right_target = ClampFloat(SPEED_BASE_TARGET - correction, 0.0f, SPEED_MAX_TARGET);
   TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
   TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
+#if ENCODER_TEST_MODE == 2
+  line_telemetry.state = 'F';
+  line_telemetry.error_x100 = (int32_t)(error * 100.0f);
+  line_telemetry.left_target = (int32_t)left_target;
+  line_telemetry.right_target = (int32_t)right_target;
+  line_telemetry.left_pwm = TIM1->CCR1;
+  line_telemetry.right_pwm = TIM1->CCR2;
+#endif
 }
 
 /* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
@@ -385,8 +455,11 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-#if !ENCODER_TEST_MODE
+#if ENCODER_TEST_MODE != 1
   uint32_t last_control_tick;
+#if ENCODER_TEST_MODE == 2
+  uint32_t last_telemetry_tick;
+#endif
 #endif
 
   /* USER CODE END 1 */
@@ -419,21 +492,24 @@ int main(void)
   if (HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL) != HAL_OK ||
       HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL) != HAL_OK)
     Error_Handler();
-#if !ENCODER_TEST_MODE
+#if ENCODER_TEST_MODE != 1
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   Init_brushless_motor(); //等待无刷电调负压启动完成
 #endif
   /* USER CODE BEGIN 2 */
-#if !ENCODER_TEST_MODE
+#if ENCODER_TEST_MODE != 1
   dodo_BMI270_init(); // 初始化陀螺仪
   /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
   WaitForRunKey();
 #endif
   previous_left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   previous_right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
-#if !ENCODER_TEST_MODE
+#if ENCODER_TEST_MODE != 1
   last_control_tick = HAL_GetTick();
+#if ENCODER_TEST_MODE == 2
+  last_telemetry_tick = last_control_tick;
+#endif
 #endif
 
   /* USER CODE END 2 */
@@ -442,7 +518,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-#if ENCODER_TEST_MODE
+#if ENCODER_TEST_MODE == 1
     uint16_t left_count;
     uint16_t right_count;
     int32_t left_delta;
@@ -471,6 +547,13 @@ int main(void)
     {
       last_control_tick = now;
       Line_FollowStep(elapsed_ms);
+#if ENCODER_TEST_MODE == 2
+      if ((uint32_t)(now - last_telemetry_tick) >= LINE_TELEMETRY_PERIOD_MS)
+      {
+        last_telemetry_tick = now;
+        Line_SendTelemetry();
+      }
+#endif
     }
     else
     {
