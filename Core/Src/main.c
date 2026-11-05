@@ -29,12 +29,9 @@
 #include "pid_helper_app.h" //PID Helper 上位机调参协议（USART3）
 #include "telemetry_stream.h" //双轮编码器 + 陀螺仪数据流（USART3，与调参互斥）
 /* USER CODE END Includes */
-
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
-
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
@@ -66,6 +63,7 @@
    原来 500ms 在 0.13 m/s 下够用，但 0.6 m/s 时 0.5 秒已冲出 30cm，
    超过就会双轮停死、再也恢复不了（环岛卡住就是这么来的）。 */
 #define LINE_SEARCH_TIME_MS 2000U  /* 最长寻线时间，超过后停车 */
+#define LINE_DIRECTION_MAX_AGE_MS 200U /* 最近偏差方向的有效期，需实车调整 */
 /* 实测每米约 19841 计数（左轮，人工推车 1 米标定）：
      0.5 m/s ≈ 10000 计数/秒，1.0 m/s ≈ 20000，1.5 m/s ≈ 30000
    原来的 2500 只有 0.13 m/s，整条速度标尺小了约 8 倍。 */
@@ -89,12 +87,9 @@
 #define LEFT_ENCODER_SIGN  1
 #define RIGHT_ENCODER_SIGN (-1)
 /* USER CODE END PD */
-
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
-
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
@@ -119,12 +114,10 @@ static uint32_t esc_high_slots;    /* high time currently stored in the table */
 static volatile uint32_t esc_period_count;
 
 /* Fill a whole 20 ms frame.  Only used once, before the DMA is started. */
-static void ESC_BuildDmaTable(uint32_t high_slots)
-{
+static void ESC_BuildDmaTable(uint32_t high_slots) {
   uint32_t i;
 
-  for (i = 0U; i < ESC_PULSE_SLOTS; ++i)
-  {
+  for (i = 0U; i < ESC_PULSE_SLOTS; ++i) {
     esc_dma_table[i] = (i < high_slots) ? GPIO_PIN_11 : ((uint32_t)GPIO_PIN_11 << 16U);
   }
   esc_high_slots = high_slots;
@@ -134,30 +127,26 @@ static void ESC_BuildDmaTable(uint32_t high_slots)
    order: the circular DMA consumes the table in that same order, and slot 9
    is not transferred before ~0.9 ms after this interrupt, so the frame that
    is already running is never disturbed. */
-static void ESC_SetPulseWidth(uint32_t high_slots)
-{
+static void ESC_SetPulseWidth(uint32_t high_slots) {
   uint32_t first;
   uint32_t last;
   uint32_t i;
 
-  if (high_slots == esc_high_slots)
-  {
+  if (high_slots == esc_high_slots) {
     return;
   }
 
   first = (high_slots < esc_high_slots) ? high_slots : esc_high_slots;
   last  = (high_slots > esc_high_slots) ? high_slots : esc_high_slots;
 
-  for (i = first; i < last; ++i)
-  {
+  for (i = first; i < last; ++i) {
     esc_dma_table[i] = (i < high_slots) ? GPIO_PIN_11 : ((uint32_t)GPIO_PIN_11 << 16U);
   }
   esc_high_slots = high_slots;
 }
 static void ESC_fullPulseWidth(void){
   uint32_t i;
-  for (i = 0U; i < ESC_PULSE_SLOTS; ++i)
-  {
+  for (i = 0U; i < ESC_PULSE_SLOTS; ++i) {
     esc_dma_table[i] = GPIO_PIN_11;
   }
   esc_high_slots = ESC_PULSE_SLOTS;
@@ -165,13 +154,10 @@ static void ESC_fullPulseWidth(void){
 /* One interrupt per 20 ms frame: DMA transfer complete in circular mode.
    The 50 Hz waveform itself is produced by TIM1 + DMA in hardware; this
    handler only counts frames and switches 0.9 ms -> 2.0 ms after 2 s. */
-static void ESC_DmaTransferComplete(DMA_HandleTypeDef *hdma)
-{
-  if (esc_period_count < ESC_START_PERIODS)
-  {
+static void ESC_DmaTransferComplete(DMA_HandleTypeDef *hdma) {
+  if (esc_period_count < ESC_START_PERIODS) {
     ++esc_period_count;
-    if (esc_period_count == ESC_START_PERIODS)
-    {
+    if (esc_period_count == ESC_START_PERIODS) {
       /* The frame that has just been completed was the last 0.9 ms frame:
          100 x 20 ms = 2 s have elapsed, 2.0 ms is now held forever. */
       if (!IF_start_Brushless_motor)
@@ -183,9 +169,7 @@ static void ESC_DmaTransferComplete(DMA_HandleTypeDef *hdma)
     }
   }
 }
-
 /* USER CODE END PV */
-
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -198,16 +182,13 @@ static void MX_USART3_UART_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 /* USER CODE END PFP */
-
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-int fputc(int ch, FILE *f)
-{
+int fputc(int ch, FILE *f) {
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
-typedef struct
-{
+typedef struct {
   float integral;
   float previous_error;
   uint8_t has_previous_error;
@@ -218,26 +199,25 @@ static SpeedPid right_speed_pid;
 static uint16_t previous_left_count;
 static uint16_t previous_right_count;
 static int8_t last_line_direction; /* -1 左，1 右，0 无法判断 */
-/* 最近一次"明确"的方向：只在误差非 0 时更新，永不清零。
-   连续弯道后车常常在正中间丢线，此时 last_line_direction 恰好是 0，
-   原来的代码会立刻判定"方向未知、寻线超时"而永久停死。用它兜底。 */
+/* 最近一次明确方向只在误差非 0 时更新，并记录时间。
+   居中后短暂丢线可用它兜底；记录过旧时不再猜测方向。 */
 static int8_t last_valid_direction;
+static uint32_t last_valid_direction_tick;
+static int8_t line_search_direction; /* 本次丢线时锁定的寻线方向 */
 static uint8_t line_lost;
 static uint8_t line_search_expired;
 static uint32_t line_lost_tick;
 static float previous_line_error;
 static uint8_t has_previous_line_error;
 
-typedef enum
-{
+typedef enum {
   LINE_LOST,
   LINE_FOUND,
   LINE_TOO_WIDE
 } LineStatus;
 
 #if ENCODER_TEST_MODE == 2
-typedef struct
-{
+typedef struct {
   uint32_t sample_tick;
   uint16_t mux_value;
   uint8_t active_count;
@@ -256,8 +236,7 @@ static LineTelemetry line_telemetry;
 /* 发送完成前 HAL 会继续读取此缓冲区，因此必须保持有效且不能覆盖。 */
 static char line_telemetry_buffer[160];
 
-static void Line_SendTelemetry(void)
-{
+static void Line_SendTelemetry(void) {
   int length;
   if (HAL_UART_GetState(&huart3) != HAL_UART_STATE_READY) return;
 
@@ -276,31 +255,32 @@ static void Line_SendTelemetry(void)
 #endif /* !PID_HELPER_ENABLE && !TELEMETRY_STREAM_ENABLE */
 #endif
 
-static float ClampFloat(float value, float minimum, float maximum)
-{
+static float ClampFloat(float value, float minimum, float maximum) {
   if (value < minimum) return minimum;
   if (value > maximum) return maximum;
   return value;
 }
 
 /* 16 位自由运行计数器的差值，允许单次采样间跨过一次回绕。 */
-static int32_t Encoder_Delta(uint16_t current, uint16_t previous)
-{
+static int32_t Encoder_Delta(uint16_t current, uint16_t previous) {
   int32_t delta = (uint16_t)(current - previous);
   if (delta > 32767) delta -= 65536;
   return delta;
 }
 
-static void SpeedPid_Reset(SpeedPid *pid)
-{
+static void SpeedPid_Reset(SpeedPid *pid) {
   pid->integral = 0.0f;
   pid->previous_error = 0.0f;
   pid->has_previous_error = 0U;
 }
 
 /* dt 为实际采样间隔（秒）；积分项限幅，并在输出饱和时抑制积分累积。 */
-static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float dt)
-{
+static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float dt) {
+  /* 本车只支持单向 PWM；零目标立即关断并清除历史积分。 */
+  if (target <= 0.0f) {
+    SpeedPid_Reset(pid);
+    return 0U;
+  }
   float error = target - actual;
   float derivative = pid->has_previous_error ? (error - pid->previous_error) / dt : 0.0f;
   float candidate_integral = ClampFloat(pid->integral + PidHelper_Ki() * error * dt,
@@ -309,12 +289,10 @@ static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float
   float feedforward = (target > 0.0f) ? (SPEED_FF_OFFSET + SPEED_FF_GAIN * target) : 0.0f;
   float output = feedforward + PidHelper_Kp() * error + candidate_integral + PidHelper_Kd() * derivative;
 
-  if ((output <= SPEED_MAX_PWM || error < 0.0f) && (output >= 0.0f || error > 0.0f))
-  {
+  if ((output <= SPEED_MAX_PWM || error < 0.0f) && (output >= 0.0f || error > 0.0f)) {
     pid->integral = candidate_integral;
   }
-  else
-  {
+  else {
     output = feedforward + PidHelper_Kp() * error + pid->integral + PidHelper_Kd() * derivative;
   }
   pid->previous_error = error;
@@ -323,18 +301,15 @@ static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float
 }
 
 /* 光电管从左到右编号 0~11，位置权重为 -11、-9、...、9、11。 */
-static LineStatus Line_GetError(float *error)
-{
+static LineStatus Line_GetError(float *error) {
   uint16_t mux_value;
   int32_t position_sum = 0;
   uint8_t active_count = 0;
   uint8_t i;
 
   MUX_get_value(&mux_value);
-  for (i = 0; i < MULTIPLEXER_CHANNEL_NUM; ++i)
-  {
-    if (MUX_GET_CHANNEL(mux_value, i) == LINE_ACTIVE_LEVEL)
-    {
+  for (i = 0; i < MULTIPLEXER_CHANNEL_NUM; ++i) {
+    if (MUX_GET_CHANNEL(mux_value, i) == LINE_ACTIVE_LEVEL) {
       position_sum += (int32_t)i * 2 - 11;
       ++active_count;
     }
@@ -351,8 +326,7 @@ static LineStatus Line_GetError(float *error)
   return LINE_FOUND;
 }
 
-static void Line_FollowStep(uint32_t elapsed_ms)
-{
+static void Line_FollowStep(uint32_t elapsed_ms) {
   float error;
   float correction;
   float left_target;
@@ -381,19 +355,16 @@ static void Line_FollowStep(uint32_t elapsed_ms)
 #endif
 #if PID_HELPER_ENABLE
   /* 上位机接管：跳过循迹，两轮以上位机下发的同一目标速度跑同一个速度环 */
-  if (PidHelper_IsTuning())
-  {
+  if (PidHelper_IsTuning()) {
     uint32_t left_pwm;
     uint32_t right_pwm;
     float pid_target = 0.0f;
 
-    if (PidHelper_IsOpenMode())
-    {
+    if (PidHelper_IsOpenMode()) {
       left_pwm = (uint32_t)PidHelper_OpenOutput();
       right_pwm = left_pwm;
     }
-    else
-    {
+    else {
       pid_target = PidHelper_TargetSpeed();
       left_pwm = SpeedPid_Update(&left_speed_pid, pid_target, left_speed, dt);
       right_pwm = SpeedPid_Update(&right_speed_pid, pid_target, right_speed, dt);
@@ -405,42 +376,43 @@ static void Line_FollowStep(uint32_t elapsed_ms)
     return;
   }
 #endif
-  if (line_status != LINE_FOUND)
-  {
+  if (line_status != LINE_FOUND) {
     uint32_t now = HAL_GetTick();
-    int8_t search_dir;
 
     SpeedPid_Reset(&left_speed_pid);
     SpeedPid_Reset(&right_speed_pid);
 
     has_previous_line_error = 0U;
 
-    /* 丢线时要往哪边找：优先用当前方向，当前正好在中间（误差=0）就用最近一次
-       明确的方向兜底。否则连续弯道后在中间丢线会直接判"方向未知"永久停死。 */
-    search_dir = (last_line_direction != 0) ? last_line_direction : last_valid_direction;
-
     /* 检测范围过宽时不猜测方向，立即停车。 */
-    if (line_status == LINE_TOO_WIDE)
-    {
+    if (line_status == LINE_TOO_WIDE) {
       last_line_direction = 0;
+      last_valid_direction = 0;
+      line_search_direction = 0;
       line_lost = 0U;
       line_search_expired = 0U;
     }
-    else if (!line_lost)
-    {
+    else if (!line_lost) {
       line_lost = 1U;
       line_lost_tick = now;
-      line_search_expired = (search_dir == 0);
+      /* 只使用最近的有效方向，丢线后保持该方向直到找到线或超时。 */
+      line_search_direction = (last_valid_direction != 0 &&
+          (uint32_t)(now - last_valid_direction_tick) <= LINE_DIRECTION_MAX_AGE_MS)
+          ? last_valid_direction : 0;
+      line_search_expired = (line_search_direction == 0);
     }
 
     if (line_lost && !line_search_expired &&
-        (uint32_t)(now - line_lost_tick) >= LINE_SEARCH_TIME_MS)
+        (uint32_t)(now - line_lost_tick) >= LINE_SEARCH_TIME_MS) {
       line_search_expired = 1U;
+      last_valid_direction = 0;
+      line_search_direction = 0;
+    }
 
-    /* 单轮低速前进，另一轮停转；只有真的从没见过方向才停车。 */
-    TIM1->CCR1 = (line_status == LINE_LOST && !line_search_expired && search_dir > 0)
+    /* 单轮低速前进，另一轮停转；方向未知、过期或超时时停车。 */
+    TIM1->CCR1 = (line_status == LINE_LOST && !line_search_expired && line_search_direction > 0)
                  ? LINE_SEARCH_PWM : 0U;
-    TIM1->CCR2 = (line_status == LINE_LOST && !line_search_expired && search_dir < 0)
+    TIM1->CCR2 = (line_status == LINE_LOST && !line_search_expired && line_search_direction < 0)
                  ? LINE_SEARCH_PWM : 0U;
 #if ENCODER_TEST_MODE == 2
     line_telemetry.state = (line_status == LINE_TOO_WIDE) ? 'W' :
@@ -458,12 +430,19 @@ static void Line_FollowStep(uint32_t elapsed_ms)
   line_lost = 0U;
   line_search_expired = 0U;
   last_line_direction = (error > 0.0f) ? 1 : ((error < 0.0f) ? -1 : 0);
-  if (last_line_direction != 0) last_valid_direction = last_line_direction;
+  if (last_line_direction != 0) {
+    last_valid_direction = last_line_direction;
+    last_valid_direction_tick = HAL_GetTick();
+  }
   error_difference = has_previous_line_error ? error - previous_line_error : 0.0f;
   previous_line_error = error;
   has_previous_line_error = 1U;
   abs_error = (error < 0.0f) ? -error : error;
   correction = LINE_KP * error + LINE_KP2 * error * abs_error + LINE_KD * error_difference;
+  /* 差分项可以减小转向，但不能让修正方向与当前白线偏差相反。 */
+  if ((error > 0.0f && correction < 0.0f) ||
+      (error < 0.0f && correction > 0.0f) || error == 0.0f)
+    correction = 0.0f;
 
   /* 弯道减速：偏差越大，两侧基础速度一起降（差速不变）。
      差速决定转向的角速度，基础速度决定前进速度；只降前进速度就能减小转弯半径。
@@ -495,30 +474,24 @@ static void Line_FollowStep(uint32_t elapsed_ms)
 }
 
 /* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
-static void WaitForRunKey(void)
-{
-  for (;;)
-  {
+static void WaitForRunKey(void) {
+  for (;;) {
     /* 上电就开始发遥测：不按发车键也能架空轮子做静态验证（此时电机不动） */
     TelemetryStream_Poll();
 #if PID_HELPER_ENABLE
     /* 上位机接管时不必等发车键；这里同时保持命令接收和遥测在线 */
     PidHelper_Poll();
-    if (PidHelper_IsTuning())
-    {
+    if (PidHelper_IsTuning()) {
       return;
     }
 #endif
-    if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET)
-    {
+    if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET) {
       HAL_Delay(RUN_KEY_DEBOUNCE_MS);
-      if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET)
-      {
+      if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET) {
         break;
       }
     }
-    else
-    {
+    else {
       HAL_Delay(1U);
     }
   }
@@ -526,8 +499,7 @@ static void WaitForRunKey(void)
   HAL_Delay(RUN_START_DELAY_MS);
 }
 /* USER CODE END 0 */
-void Init_brushless_motor(void)
-{
+void Init_brushless_motor(void) {
   /* PA11 idles low: the first high level then also lasts exactly 0.9 ms,
      because the DMA writes the first slot 0.1 ms after TIM1 is started. */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, GPIO_PIN_RESET);
@@ -548,9 +520,7 @@ void Init_brushless_motor(void)
  * @brief  The application entry point.
  * @retval int
  */
-int main(void)
-{
-
+int main(void) {
   /* USER CODE BEGIN 1 */
 #if ENCODER_TEST_MODE != 1
   uint32_t last_control_tick;
@@ -558,25 +528,19 @@ int main(void)
   uint32_t last_telemetry_tick;
 #endif
 #endif
-
   /* USER CODE END 1 */
-
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
-
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
-
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
@@ -602,9 +566,11 @@ int main(void)
      第 5 个参数是调参时允许的目标速度上限，单独给 30000，不改动循迹用的
      SPEED_MAX_TARGET（那个宏循迹逻辑还在用）。 */
   PidHelper_Init(&huart3, SPEED_KP, SPEED_KI, SPEED_KD, 30000.0f, SPEED_MAX_PWM);
-#if ENCODER_TEST_MODE != 1
+#if ENCODER_TEST_MODE != 1 || TELEMETRY_STREAM_ENABLE
   dodo_BMI270_init(); // 初始化陀螺仪
   /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
+#endif
+#if ENCODER_TEST_MODE != 1
   WaitForRunKey();
 #endif
   previous_left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
@@ -615,14 +581,15 @@ int main(void)
   last_telemetry_tick = last_control_tick;
 #endif
 #endif
-
   /* USER CODE END 2 */
-
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+  while (1) {
 #if ENCODER_TEST_MODE == 1
+#if TELEMETRY_STREAM_ENABLE
+    /* 数据流模式独占串口；保持快速轮询，不发送编码器测试文本。 */
+    HAL_Delay(1U);
+#else
     uint16_t left_count;
     uint16_t right_count;
     int32_t left_delta;
@@ -644,16 +611,15 @@ int main(void)
                       (long)(right_delta * RIGHT_ENCODER_SIGN));
     if (length > 0 && (unsigned int)length < sizeof(message))
       HAL_UART_Transmit(&huart3, (uint8_t *)message, (uint16_t)length, 100U);
+#endif
 #else
     uint32_t now = HAL_GetTick();
     uint32_t elapsed_ms = now - last_control_tick;
-    if (elapsed_ms >= LINE_PERIOD_MS)
-    {
+    if (elapsed_ms >= LINE_PERIOD_MS) {
       last_control_tick = now;
       Line_FollowStep(elapsed_ms);
 #if ENCODER_TEST_MODE == 2
-      if ((uint32_t)(now - last_telemetry_tick) >= LINE_TELEMETRY_PERIOD_MS)
-      {
+      if ((uint32_t)(now - last_telemetry_tick) >= LINE_TELEMETRY_PERIOD_MS) {
         last_telemetry_tick = now;
 #if !PID_HELPER_ENABLE && !TELEMETRY_STREAM_ENABLE
         /* 调参协议或数据流占用同一个串口时，CSV 文本输出必须让位 */
@@ -662,8 +628,7 @@ int main(void)
       }
 #endif
     }
-    else
-    {
+    else {
       HAL_Delay(1U);
     }
 #endif
@@ -679,8 +644,7 @@ int main(void)
  * @brief System Clock Configuration
  * @retval None
  */
-void SystemClock_Config(void)
-{
+void SystemClock_Config(void) {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
@@ -694,10 +658,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { Error_Handler(); }
 
   /** Initializes the CPU, AHB and APB buses clocks
    */
@@ -707,10 +668,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) { Error_Handler(); }
 }
 
 /**
@@ -718,15 +676,10 @@ void SystemClock_Config(void)
  * @param None
  * @retval None
  */
-static void MX_SPI1_Init(void)
-{
-
+static void MX_SPI1_Init(void) {
   /* USER CODE BEGIN SPI1_Init 0 */
-
   /* USER CODE END SPI1_Init 0 */
-
   /* USER CODE BEGIN SPI1_Init 1 */
-
   /* USER CODE END SPI1_Init 1 */
   /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
@@ -741,12 +694,8 @@ static void MX_SPI1_Init(void)
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi1.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_SPI_Init(&hspi1) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN SPI1_Init 2 */
-
   /* USER CODE END SPI1_Init 2 */
 }
 
@@ -755,20 +704,15 @@ static void MX_SPI1_Init(void)
  * @param None
  * @retval None
  */
-static void MX_TIM1_Init(void)
-{
-
+static void MX_TIM1_Init(void) {
   /* USER CODE BEGIN TIM1_Init 0 */
-
   /* USER CODE END TIM1_Init 0 */
-
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
   TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
   /* USER CODE BEGIN TIM1_Init 1 */
-
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
@@ -777,25 +721,13 @@ static void MX_TIM1_Init(void)
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK) { Error_Handler(); }
   sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK) { Error_Handler(); }
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) { Error_Handler(); }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK) { Error_Handler(); }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
@@ -803,14 +735,8 @@ static void MX_TIM1_Init(void)
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
   sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK) { Error_Handler(); }
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK) { Error_Handler(); }
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
@@ -818,12 +744,8 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN TIM1_Init 2 */
-
   /* USER CODE END TIM1_Init 2 */
   HAL_TIM_MspPostInit(&htim1);
 }
@@ -833,18 +755,13 @@ static void MX_TIM1_Init(void)
  * @param None
  * @retval None
  */
-static void MX_TIM2_Init(void)
-{
-
+static void MX_TIM2_Init(void) {
   /* USER CODE BEGIN TIM2_Init 0 */
-
   /* USER CODE END TIM2_Init 0 */
-
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
   /* USER CODE BEGIN TIM2_Init 1 */
-
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 71;
@@ -852,23 +769,13 @@ static void MX_TIM2_Init(void)
   htim2.Init.Period = 999;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK) { Error_Handler(); }
   sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK) { Error_Handler(); }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN TIM2_Init 2 */
-
   /* USER CODE END TIM2_Init 2 */
 }
 
@@ -877,18 +784,13 @@ static void MX_TIM2_Init(void)
  * @param None
  * @retval None
  */
-static void MX_TIM3_Init(void)
-{
-
+static void MX_TIM3_Init(void) {
   /* USER CODE BEGIN TIM3_Init 0 */
-
   /* USER CODE END TIM3_Init 0 */
-
   TIM_Encoder_InitTypeDef sConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
   /* USER CODE BEGIN TIM3_Init 1 */
-
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 0;
@@ -905,18 +807,11 @@ static void MX_TIM3_Init(void)
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
   sConfig.IC2Filter = 0;
-  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK) { Error_Handler(); }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN TIM3_Init 2 */
-
   /* USER CODE END TIM3_Init 2 */
 }
 
@@ -925,18 +820,13 @@ static void MX_TIM3_Init(void)
  * @param None
  * @retval None
  */
-static void MX_TIM4_Init(void)
-{
-
+static void MX_TIM4_Init(void) {
   /* USER CODE BEGIN TIM4_Init 0 */
-
   /* USER CODE END TIM4_Init 0 */
-
   TIM_Encoder_InitTypeDef sConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
   /* USER CODE BEGIN TIM4_Init 1 */
-
   /* USER CODE END TIM4_Init 1 */
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 0;
@@ -953,18 +843,11 @@ static void MX_TIM4_Init(void)
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
   sConfig.IC2Filter = 0;
-  if (HAL_TIM_Encoder_Init(&htim4, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIM_Encoder_Init(&htim4, &sConfig) != HAL_OK) { Error_Handler(); }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN TIM4_Init 2 */
-
   /* USER CODE END TIM4_Init 2 */
 }
 
@@ -973,15 +856,10 @@ static void MX_TIM4_Init(void)
  * @param None
  * @retval None
  */
-static void MX_USART3_UART_Init(void)
-{
-
+static void MX_USART3_UART_Init(void) {
   /* USER CODE BEGIN USART3_Init 0 */
-
   /* USER CODE END USART3_Init 0 */
-
   /* USER CODE BEGIN USART3_Init 1 */
-
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
   huart3.Init.BaudRate = 115200;
@@ -991,21 +869,15 @@ static void MX_USART3_UART_Init(void)
   huart3.Init.Mode = UART_MODE_TX_RX;
   huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_UART_Init(&huart3) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN USART3_Init 2 */
-
   /* USER CODE END USART3_Init 2 */
 }
 
 /**
  * Enable DMA controller clock
  */
-static void MX_DMA_Init(void)
-{
-
+static void MX_DMA_Init(void) {
   /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
 
@@ -1023,13 +895,10 @@ static void MX_DMA_Init(void)
  * @param None
  * @retval None
  */
-static void MX_GPIO_Init(void)
-{
+static void MX_GPIO_Init(void) {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
-
   /* USER CODE END MX_GPIO_Init_1 */
-
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
@@ -1100,25 +969,20 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-
 /* USER CODE END 4 */
-
 /**
  * @brief  This function is executed in case of error occurrence.
  * @retval None
  */
-void Error_Handler(void)
-{
+void Error_Handler(void) {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-  while (1)
-  {
+  while (1) {
   }
   /* USER CODE END Error_Handler_Debug */
 }
@@ -1130,8 +994,7 @@ void Error_Handler(void)
  * @param  line: assert_param error line source number
  * @retval None
  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
+void assert_failed(uint8_t *file, uint32_t line) {
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
      ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */

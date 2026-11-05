@@ -12,13 +12,14 @@
  * 输出格式（每行，\r\n 结尾，全部为十进制整数）：
  *   seq, t_ms, dt_ms, l_delta, r_delta, gx, gy, gz, valid
  *
- *   seq      帧序号，从 0 开始，用于电脑端识别丢包
+ *   seq      采样序号，从 0 开始；串口忙或发送失败时也递增，接收端可识别缺口
  *   t_ms     采样时刻，HAL_GetTick()，毫秒（STM32 上电起算，约 49.7 天回绕）
- *   dt_ms    本次与上次编码器采样的实际间隔（毫秒），不是固定 50
- *   l_delta  左轮本周期计数增量（已乘 LEFT_ENCODER_SIGN，前进为正）
- *   r_delta  右轮本周期计数增量（已乘 RIGHT_ENCODER_SIGN，前进为正）
+ *   dt_ms    本次与上次成功启动 UART 发送的采样间隔（毫秒），不是固定 50
+ *   l_delta  两次成功启动发送之间的左轮累计增量（已乘 LEFT_ENCODER_SIGN）
+ *   r_delta  两次成功启动发送之间的右轮累计增量（已乘 RIGHT_ENCODER_SIGN）
  *   gx/gy/gz 陀螺仪三轴原始值（int16，±2000 dps 量程）
  *   valid    1 = 本次 BMI270 读取成功；0 = 读取失败或未初始化（此时三轴为 0，不代表静止）
+ * 若无线链路丢失已经发送的帧，后续帧不会补上这些增量，接收端应检查序号缺口。
  *
  * 电脑端换算：
  *   轮速(计数/秒) = delta * 1000 / dt_ms
