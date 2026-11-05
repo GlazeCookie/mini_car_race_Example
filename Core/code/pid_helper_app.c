@@ -55,8 +55,8 @@ static int ph_tx(void *ctx, const uint8_t *data, uint16_t length)
         return PID_HELPER_TX_FAIL;
     }
 
-    /* 阻塞发送：36 字节约 3.1 ms（115200），对 10 ms 控制周期可接受，
-       同时保证 ACK 一定在上位机 1.5 s 的等待窗口内发出去 */
+    /* 阻塞发送：36 字节约 3.1 ms（115200），会占用主循环时间；
+       目标控制周期为 5 ms 时需实测时序，同时需保证 ACK 及时发送。 */
     return (HAL_UART_Transmit(huart, (uint8_t *)data, length, PH_TX_TIMEOUT_MS) == HAL_OK)
                ? PID_HELPER_TX_OK
                : PID_HELPER_TX_FAIL;
