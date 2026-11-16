@@ -8,6 +8,19 @@
       "args": [],
       "cwd": "/Users/Admin/study/mini_car_race_Example/Core/Src",
       "program": "/Users/Admin/study/mini_car_race_Example/Core/Src/build/Debug/outDebug"
+    },
+    {
+      "name": "STM32: Debug (ST-Link)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "openocd",
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build/stm32-debug/micro_smartcar.elf",
+      "serverpath": "/opt/homebrew/bin/openocd",
+      "gdbPath": "/opt/homebrew/bin/arm-none-eabi-gdb",
+      "configFiles": ["${workspaceFolder}/openocd/stlink-stm32f103.cfg"],
+      "runToEntryPoint": "main",
+      "preLaunchTask": "STM32: Build"
     }
   ]
 }

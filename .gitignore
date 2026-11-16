@@ -1,4 +1,5 @@
 # Keil compiler/linker outputs (keep source, project and scatter files)
+/build/
 /MDK-ARM/**/*.o
 /MDK-ARM/**/*.obj
 /MDK-ARM/**/*.d

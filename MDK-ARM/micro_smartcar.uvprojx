@@ -556,6 +556,16 @@
           <GroupName>code</GroupName>
           <Files>
             <File>
+              <FileName>turn_test.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\code\turn_test.c</FilePath>
+            </File>
+            <File>
+              <FileName>turn_test.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\code\turn_test.h</FilePath>
+            </File>
+            <File>
               <FileName>multiplexer.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\code\multiplexer.h</FilePath>
