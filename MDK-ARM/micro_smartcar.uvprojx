@@ -556,14 +556,14 @@
           <GroupName>code</GroupName>
           <Files>
             <File>
-              <FileName>turn_test.c</FileName>
+              <FileName>track_nav.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Core\code\turn_test.c</FilePath>
+              <FilePath>..\Core\code\track_nav.c</FilePath>
             </File>
             <File>
-              <FileName>turn_test.h</FileName>
+              <FileName>track_nav.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Core\code\turn_test.h</FilePath>
+              <FilePath>..\Core\code\track_nav.h</FilePath>
             </File>
             <File>
               <FileName>multiplexer.h</FileName>

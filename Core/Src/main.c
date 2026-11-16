@@ -28,7 +28,7 @@
 #include "stdio.h"
 #include "pid_helper_app.h" //PID Helper 上位机调参协议（USART3）
 #include "telemetry_stream.h" //双轮编码器 + 陀螺仪数据流（USART3，与调参互斥）
-#include "turn_test.h" // 四次原地转向测试
+#include "track_nav.h" // 赛道全遍历分段状态机（12路多簇 + BMI270 + 编码器）
 /* USER CODE END Includes */
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -36,14 +36,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 4 /* 0: 循迹；1: 编码器测试；2: 循迹遥测；3: 一米停车；4: 四次旋转 */
+#define ENCODER_TEST_MODE 3 /* 0: 基础循迹；1: 编码器测试；2: 基础循迹遥测；3: 赛道全遍历模式 */
 #define ENCODER_TEST_PERIOD_MS 200U
 #define LINE_TELEMETRY_PERIOD_MS 100U
-#if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 4
-#error "ENCODER_TEST_MODE must be 0, 1, 2, 3 or 4"
-#endif
-#if ENCODER_TEST_MODE == 4 && TELEMETRY_STREAM_ENABLE
-#error "Disable TELEMETRY_STREAM_ENABLE for the rotation test"
+#if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 3
+#error "ENCODER_TEST_MODE must be 0, 1, 2 or 3"
 #endif
 #define RUN_KEY_DEBOUNCE_MS 20U
 #define RUN_START_DELAY_MS  2000U
@@ -91,20 +88,6 @@
 #define SPEED_INTEGRAL_LIMIT 1000.0f /* 积分项在 PWM 中的最大绝对贡献 */
 #define LEFT_ENCODER_SIGN  1
 #define RIGHT_ENCODER_SIGN (-1)
-/* 一米测试：最近一次人工推行 1 m 的左轮串口增量合计约 37188。
-   此前推车标定为 19841，另一次实跑约 0.45 m、触发计数 19851；
-   各次结果不一致，需复测并排查打滑、串口丢行与信号干扰。
-   停车后的滑行距离未知，目标值和停车偏移均需实测调整。 */
-#define ONE_METER_LEFT_COUNTS 37188
-#define ONE_METER_RUN_CORRECTION_COUNTS 1957 /* 37188 计数实跑约 0.95 m，按比例暂估 */
-#define ONE_METER_DECEL_COUNTS 7438 /* 按本次标定约最后 20 cm 停止循迹并减速 */
-#define ONE_METER_MIN_SPEED 3000.0f /* 按本次标定约 0.081 m/s，需实测能否稳定运行 */
-#define ONE_METER_STOP_OFFSET_COUNTS 0 /* 按实测停车滑行距离调整 */
-#define ONE_METER_NO_PROGRESS_MS 1000U
-#define ONE_METER_TARGET_COUNTS (ONE_METER_LEFT_COUNTS + ONE_METER_RUN_CORRECTION_COUNTS - ONE_METER_STOP_OFFSET_COUNTS)
-#if ONE_METER_STOP_OFFSET_COUNTS < 0 || ONE_METER_TARGET_COUNTS <= 0
-#error "ONE_METER_STOP_OFFSET_COUNTS must be within the target distance"
-#endif
 /* USER CODE END PD */
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
@@ -217,6 +200,7 @@ static SpeedPid left_speed_pid;
 static SpeedPid right_speed_pid;
 static uint16_t previous_left_count;
 static uint16_t previous_right_count;
+#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
 static int8_t last_line_direction; /* -1 左，1 右，0 无法判断 */
 /* 最近一次明确方向只在误差非 0 时更新，并记录时间。
    居中后短暂丢线可用它兜底；记录过旧时不再猜测方向。 */
@@ -229,63 +213,7 @@ static uint32_t line_lost_tick;
 static float previous_line_error;
 static uint8_t has_previous_line_error;
 
-#if ENCODER_TEST_MODE == 3
-typedef enum {
-  ONE_METER_STOP_NONE,
-  ONE_METER_STOP_TARGET,
-  ONE_METER_STOP_NO_PROGRESS,
-  ONE_METER_STOP_LINE_LOST,
-  ONE_METER_STOP_LINE_TOO_WIDE
-} OneMeterStopReason;
-
-static int64_t one_meter_counts;
-static int64_t one_meter_peak_counts;
-static uint8_t one_meter_final_straight;
-static uint32_t one_meter_progress_tick;
-static uint8_t one_meter_stopped;
-static OneMeterStopReason one_meter_stop_reason;
-
-static void OneMeter_Stop(OneMeterStopReason reason) {
-  TIM1->CCR1 = 0U;
-  TIM1->CCR2 = 0U;
-  one_meter_stopped = 1U; /* 停车后保持锁定，复位后才能再次运行。 */
-  one_meter_stop_reason = reason;
-}
-
-#if !TELEMETRY_STREAM_ENABLE
-/* 停车后重复输出原因；静态缓冲区在中断发送完成前不能被覆盖。 */
-static void OneMeter_ReportStop(void) {
-  static char message[128];
-  static uint32_t last_report_tick;
-  static uint8_t first_report_sent;
-  const char *reason;
-  uint32_t now;
-  int length;
-
-  if (!one_meter_stopped || HAL_UART_GetState(&huart3) != HAL_UART_STATE_READY) return;
-  now = HAL_GetTick();
-  if (first_report_sent && (uint32_t)(now - last_report_tick) < 1000U) return;
-
-  switch (one_meter_stop_reason) {
-    case ONE_METER_STOP_TARGET: reason = "TARGET"; break;
-    case ONE_METER_STOP_NO_PROGRESS: reason = "NO_PROGRESS"; break;
-    case ONE_METER_STOP_LINE_LOST: reason = "LINE_LOST"; break;
-    case ONE_METER_STOP_LINE_TOO_WIDE: reason = "LINE_TOO_WIDE"; break;
-    default: return;
-  }
-  length = snprintf(message, sizeof(message),
-                    "ONE_METER,reason=%s,counts=%ld,peak=%ld,target=%ld\r\n",
-                    reason, (long)one_meter_counts, (long)one_meter_peak_counts,
-                    (long)ONE_METER_TARGET_COUNTS);
-  if (length > 0 && (unsigned int)length < sizeof(message) &&
-      HAL_UART_Transmit_IT(&huart3, (uint8_t *)message, (uint16_t)length) == HAL_OK) {
-    last_report_tick = now;
-    first_report_sent = 1U;
-  }
-}
 #endif
-#endif
-
 typedef enum {
   LINE_LOST,
   LINE_FOUND,
@@ -377,6 +305,7 @@ static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float
 }
 
 /* 光电管从左到右编号 0~11，位置权重为 -11、-9、...、9、11。 */
+#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
 static LineStatus Line_GetError(float *error) {
   uint16_t mux_value;
   int32_t position_sum = 0;
@@ -401,12 +330,14 @@ static LineStatus Line_GetError(float *error) {
   *error = (float)position_sum / active_count;
   return LINE_FOUND;
 }
+#endif
 
 static void Line_FollowStep(uint32_t elapsed_ms) {
-  float error;
-  float correction;
   float left_target;
   float right_target;
+#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
+  float error;
+  float correction;
   float error_difference;
   float abs_error;
   float abs_error_diff;
@@ -414,60 +345,19 @@ static void Line_FollowStep(uint32_t elapsed_ms) {
   float speed_scale;
   float base_speed;
   LineStatus line_status;
+#endif
   float dt = (float)elapsed_ms / 1000.0f;
   uint16_t left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   uint16_t right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
   int32_t left_delta = Encoder_Delta(left_count, previous_left_count) * LEFT_ENCODER_SIGN;
+  int32_t right_delta = Encoder_Delta(right_count, previous_right_count) * RIGHT_ENCODER_SIGN;
   float left_speed = (float)left_delta / dt;
-  float right_speed = (float)(Encoder_Delta(right_count, previous_right_count) * RIGHT_ENCODER_SIGN) / dt;
+  float right_speed = (float)right_delta / dt;
 
   previous_left_count = left_count;
   previous_right_count = right_count;
 
-#if ENCODER_TEST_MODE == 3
-  if (one_meter_stopped) {
-    TIM1->CCR1 = 0U;
-    TIM1->CCR2 = 0U;
-    return;
-  }
-  one_meter_counts += left_delta;
-  if (one_meter_counts > one_meter_peak_counts) {
-    one_meter_peak_counts = one_meter_counts;
-    one_meter_progress_tick = HAL_GetTick();
-  }
-  if (one_meter_counts >= ONE_METER_TARGET_COUNTS) {
-    SpeedPid_Reset(&left_speed_pid);
-    SpeedPid_Reset(&right_speed_pid);
-    OneMeter_Stop(ONE_METER_STOP_TARGET);
-    return;
-  }
-  if ((uint32_t)(HAL_GetTick() - one_meter_progress_tick) >= ONE_METER_NO_PROGRESS_MS) {
-    SpeedPid_Reset(&left_speed_pid);
-    SpeedPid_Reset(&right_speed_pid);
-    OneMeter_Stop(ONE_METER_STOP_NO_PROGRESS);
-    return;
-  }
-  {
-    int64_t remaining = ONE_METER_TARGET_COUNTS - one_meter_counts;
-    if (remaining <= ONE_METER_DECEL_COUNTS) one_meter_final_straight = 1U;
-    if (one_meter_final_straight) {
-      /* 最后约 20 cm 不读取白线，以相同轮速目标直行并逐渐减速。 */
-      float approach_speed = SPEED_BASE_TARGET * (float)remaining / ONE_METER_DECEL_COUNTS;
-      if (approach_speed < ONE_METER_MIN_SPEED) approach_speed = ONE_METER_MIN_SPEED;
-      approach_speed = ClampFloat(approach_speed, 0.0f, SPEED_MAX_TARGET);
-      TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, approach_speed, left_speed, dt);
-      TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, approach_speed, right_speed, dt);
-      return;
-    }
-  }
-#endif
-  line_status = Line_GetError(&error);
-#if ENCODER_TEST_MODE == 2
-  line_telemetry.sample_tick = HAL_GetTick();
-  line_telemetry.left_speed = (int32_t)left_speed;
-  line_telemetry.right_speed = (int32_t)right_speed;
-#endif
-#if PID_HELPER_ENABLE && ENCODER_TEST_MODE != 3 && ENCODER_TEST_MODE != 4
+#if PID_HELPER_ENABLE
   /* 上位机接管：跳过循迹，两轮以上位机下发的同一目标速度跑同一个速度环 */
   if (PidHelper_IsTuning()) {
     uint32_t left_pwm;
@@ -490,14 +380,28 @@ static void Line_FollowStep(uint32_t elapsed_ms) {
     return;
   }
 #endif
-  if (line_status != LINE_FOUND) {
 #if ENCODER_TEST_MODE == 3
-    /* 一米精度测试不执行盲寻线，丢线或读数异常时锁定停车。 */
+  if (TrackNav_Step(left_delta, right_delta, dt, &left_target, &right_target)) {
     SpeedPid_Reset(&left_speed_pid);
     SpeedPid_Reset(&right_speed_pid);
-    OneMeter_Stop(line_status == LINE_LOST ? ONE_METER_STOP_LINE_LOST : ONE_METER_STOP_LINE_TOO_WIDE);
+    TIM1->CCR1 = 0U;
+    TIM1->CCR2 = 0U;
+    PidHelper_Report(left_speed, 0.0f, 0.0f);
     return;
+  }
+  TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
+  TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
+  PidHelper_Report(left_speed, left_target, (float)TIM1->CCR1);
+  return;
 #endif
+#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
+  line_status = Line_GetError(&error);
+#if ENCODER_TEST_MODE == 2
+  line_telemetry.sample_tick = HAL_GetTick();
+  line_telemetry.left_speed = (int32_t)left_speed;
+  line_telemetry.right_speed = (int32_t)right_speed;
+#endif
+  if (line_status != LINE_FOUND) {
     uint32_t now = HAL_GetTick();
 
     SpeedPid_Reset(&left_speed_pid);
@@ -592,6 +496,7 @@ static void Line_FollowStep(uint32_t elapsed_ms) {
   line_telemetry.right_pwm = TIM1->CCR2;
 #endif
   PidHelper_Report(left_speed, left_target, (float)TIM1->CCR1);
+#endif
 }
 
 /* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
@@ -599,7 +504,7 @@ static void WaitForRunKey(void) {
   for (;;) {
     /* 上电就开始发遥测：不按发车键也能架空轮子做静态验证（此时电机不动） */
     TelemetryStream_Poll();
-#if PID_HELPER_ENABLE && ENCODER_TEST_MODE != 3 && ENCODER_TEST_MODE != 4
+#if PID_HELPER_ENABLE
     /* 上位机接管时不必等发车键；这里同时保持命令接收和遥测在线 */
     PidHelper_Poll();
     if (PidHelper_IsTuning()) {
@@ -643,7 +548,7 @@ void Init_brushless_motor(void) {
  */
 int main(void) {
   /* USER CODE BEGIN 1 */
-#if ENCODER_TEST_MODE != 1 && ENCODER_TEST_MODE != 4
+#if ENCODER_TEST_MODE != 1
   uint32_t last_control_tick;
 #if ENCODER_TEST_MODE == 2
   uint32_t last_telemetry_tick;
@@ -686,12 +591,7 @@ int main(void) {
   /* PID Helper 调参协议挂在 USART3（PB10/PB11）；默认增益取编译期参数。
      第 5 个参数是调参时允许的目标速度上限，单独给 30000，不改动循迹用的
      SPEED_MAX_TARGET（那个宏循迹逻辑还在用）。 */
-#if ENCODER_TEST_MODE == 3 || ENCODER_TEST_MODE == 4
-  /* 只初始化默认增益，不启动上位机接收，防止测试中接管电机。 */
-  PidHelper_Init(NULL, SPEED_KP, SPEED_KI, SPEED_KD, 30000.0f, SPEED_MAX_PWM);
-#else
   PidHelper_Init(&huart3, SPEED_KP, SPEED_KI, SPEED_KD, 30000.0f, SPEED_MAX_PWM);
-#endif
 #if ENCODER_TEST_MODE != 1 || TELEMETRY_STREAM_ENABLE
   dodo_BMI270_init(); // 初始化陀螺仪
   /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
@@ -699,15 +599,12 @@ int main(void) {
 #if ENCODER_TEST_MODE != 1
   WaitForRunKey();
 #endif
+#if ENCODER_TEST_MODE == 3
+  TrackNav_Start();
+#endif
   previous_left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   previous_right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
-#if ENCODER_TEST_MODE == 3
-  one_meter_progress_tick = HAL_GetTick();
-#endif
-#if ENCODER_TEST_MODE == 4
-  TurnTest_Start();
-#endif
-#if ENCODER_TEST_MODE != 1 && ENCODER_TEST_MODE != 4
+#if ENCODER_TEST_MODE != 1
   last_control_tick = HAL_GetTick();
 #if ENCODER_TEST_MODE == 2
   last_telemetry_tick = last_control_tick;
@@ -744,9 +641,6 @@ int main(void) {
     if (length > 0 && (unsigned int)length < sizeof(message))
       HAL_UART_Transmit(&huart3, (uint8_t *)message, (uint16_t)length, 100U);
 #endif
-#elif ENCODER_TEST_MODE == 4
-    TurnTest_Poll();
-    HAL_Delay(1U);
 #else
     uint32_t now = HAL_GetTick();
     uint32_t elapsed_ms = now - last_control_tick;
@@ -771,9 +665,6 @@ int main(void) {
     /* USER CODE BEGIN 3 */
     PidHelper_Poll(); /* 20 ms 一帧遥测 + 串口接收兜底 */
     TelemetryStream_Poll(); /* 50 ms 一帧：双轮增量 + 陀螺仪三轴 */
-#if ENCODER_TEST_MODE == 3 && !TELEMETRY_STREAM_ENABLE
-    OneMeter_ReportStop();
-#endif
   }
   /* USER CODE END 3 */
 }
