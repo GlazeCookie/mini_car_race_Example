@@ -1,6 +1,7 @@
 #include "pid_helper_app.h"
 #include "pid_helper_protocol.h"
 
+#include <math.h>
 #include <string.h>
 
 /* PID 增益：默认取 main.c 传进来的编译期参数，上位机下发后覆盖。
@@ -13,7 +14,9 @@ static float s_kd = 0.0f;
 #if PID_HELPER_ENABLE
 
 #define PH_TELEMETRY_PERIOD_MS 20u
-#define PH_TX_TIMEOUT_MS       20u
+#define PH_RX_QUEUE_SIZE       128u
+#define PH_RX_BUDGET           48u
+#define PH_TX_QUEUE_SIZE       8u
 /* 接管期间如果连续这么久没收到任何命令，就把目标速度和开环输出清零（停车），
    但保持接管状态，避免突然把控制权还给循迹导致车子自己跑出去。 */
 #define PH_TUNING_TIMEOUT_MS   15000u
@@ -21,6 +24,16 @@ static float s_kd = 0.0f;
 static PIDHelperProtocol s_proto;
 static UART_HandleTypeDef *s_huart;
 static uint8_t s_rx_byte;
+/* 中断只收字节并重新挂接；协议解析和发送都在主循环里处理。 */
+static volatile uint8_t s_rx_queue[PH_RX_QUEUE_SIZE];
+static volatile uint8_t s_rx_head, s_rx_tail, s_rx_overflow;
+typedef struct {
+    uint8_t data[PID_HELPER_PROTOCOL_TELEMETRY_FRAME_SIZE];
+    uint16_t length;
+} PidHelperTxFrame;
+static PidHelperTxFrame s_tx_queue[PH_TX_QUEUE_SIZE];
+static uint8_t s_tx_head, s_tx_tail, s_tx_active;
+static uint32_t s_tx_started_tick;
 
 /* 限幅 */
 static float s_max_target;
@@ -50,16 +63,39 @@ static float ph_clamp(float value, float minimum, float maximum)
 static int ph_tx(void *ctx, const uint8_t *data, uint16_t length)
 {
     UART_HandleTypeDef *huart = (UART_HandleTypeDef *)ctx;
+    uint8_t next = (uint8_t)((s_tx_head + 1u) % PH_TX_QUEUE_SIZE);
 
-    if (huart == NULL) {
+    if (huart == NULL || data == NULL || length == 0u ||
+        length > PID_HELPER_PROTOCOL_TELEMETRY_FRAME_SIZE || next == s_tx_tail) {
         return PID_HELPER_TX_FAIL;
     }
+    memcpy(s_tx_queue[s_tx_head].data, data, length);
+    s_tx_queue[s_tx_head].length = length;
+    s_tx_head = next;
+    return PID_HELPER_TX_OK;
+}
 
-    /* 阻塞发送：36 字节约 3.1 ms（115200），会占用主循环时间；
-       目标控制周期为 5 ms 时需实测时序，同时需保证 ACK 及时发送。 */
-    return (HAL_UART_Transmit(huart, (uint8_t *)data, length, PH_TX_TIMEOUT_MS) == HAL_OK)
-               ? PID_HELPER_TX_OK
-               : PID_HELPER_TX_FAIL;
+/* 发送缓冲必须一直保留到中断发送完成；串口繁忙时不等待。 */
+static void ph_tx_poll(uint32_t now)
+{
+    if (s_tx_active != 0u) {
+        if (s_huart->gState == HAL_UART_STATE_READY) {
+            s_tx_tail = (uint8_t)((s_tx_tail + 1u) % PH_TX_QUEUE_SIZE);
+            s_tx_active = 0u;
+        } else if ((uint32_t)(now - s_tx_started_tick) >= 100u) {
+            /* 本项目 USART3 未配置 TX DMA；中止不等待外设完成。 */
+            (void)HAL_UART_AbortTransmit(s_huart);
+            s_tx_tail = (uint8_t)((s_tx_tail + 1u) % PH_TX_QUEUE_SIZE);
+            s_tx_active = 0u;
+        }
+    }
+    if (s_tx_active == 0u && s_tx_tail != s_tx_head &&
+        s_huart->gState == HAL_UART_STATE_READY &&
+        HAL_UART_Transmit_IT(s_huart, s_tx_queue[s_tx_tail].data,
+                             s_tx_queue[s_tx_tail].length) == HAL_OK) {
+        s_tx_started_tick = now;
+        s_tx_active = 1u;
+    }
 }
 
 /* cmd=1：下发 PID。只改增益，不触发接管，避免调增益时车子突然停下 */
@@ -70,6 +106,8 @@ static PIDHelperProtocolCommandResult ph_on_pid(void *user_arg,
     (void)user_arg;
     (void)seq;
 
+    if (!isfinite(p) || !isfinite(i) || !isfinite(d))
+        return PIDHelperProtocol_MakeResult(0u, 0.0f);
     s_last_cmd_tick = HAL_GetTick();
     s_kp = ph_clamp(p, 0.0f, 1000.0f);
     s_ki = ph_clamp(i, 0.0f, 1000.0f);
@@ -97,6 +135,7 @@ static PIDHelperProtocolCommandResult ph_on_output(void *user_arg, float output,
     (void)user_arg;
     (void)seq;
 
+    if (!isfinite(output)) return PIDHelperProtocol_MakeResult(0u, 0.0f);
     s_last_cmd_tick = HAL_GetTick();
     s_open_output = ph_clamp(output, 0.0f, s_max_pwm);
     s_open_mode = 1u;
@@ -111,6 +150,7 @@ static PIDHelperProtocolCommandResult ph_on_setpoint(void *user_arg, float setpo
     (void)seq;
 
     /* 本车 PWM 单向，负速度按 0 处理 */
+    if (!isfinite(setpoint)) return PIDHelperProtocol_MakeResult(0u, 0.0f);
     s_last_cmd_tick = HAL_GetTick();
     s_target_speed = ph_clamp(setpoint, 0.0f, s_max_target);
     s_open_mode = 0u;
@@ -154,6 +194,9 @@ void PidHelper_Init(UART_HandleTypeDef *huart,
     s_actual = 0.0f;
     s_target = 0.0f;
     s_input = 0.0f;
+    s_rx_head = s_rx_tail = s_rx_overflow = 0u;
+    s_tx_head = s_tx_tail = s_tx_active = 0u;
+    s_tx_started_tick = 0u;
 
     memset(&config, 0, sizeof(config));
     config.tx_ctx = huart;
@@ -175,26 +218,56 @@ void PidHelper_Init(UART_HandleTypeDef *huart,
     }
 }
 
-/* 每收一个字节立刻重新挂一次中断接收，保证 17 字节命令帧连续到达时不丢字节 */
+/* 中断只缓存字节，协议解码和 ACK 入队留给主循环。 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
+    uint8_t next;
     if ((s_huart == NULL) || (huart != s_huart)) {
         return;
     }
-
-    (void)PIDHelperProtocol_InputByte(&s_proto, s_rx_byte);
+    next = (uint8_t)((s_rx_head + 1u) % PH_RX_QUEUE_SIZE);
+    if (next == s_rx_tail) s_rx_overflow = 1u;
+    else {
+        s_rx_queue[s_rx_head] = s_rx_byte;
+        s_rx_head = next;
+    }
     (void)HAL_UART_Receive_IT(huart, &s_rx_byte, 1u);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (s_huart == NULL || huart != s_huart) return;
+    /* 字节流可能中断；让主循环丢弃残帧并重新同步。 */
+    s_rx_overflow = 1u;
+    if (huart->RxState == HAL_UART_STATE_READY)
+        (void)HAL_UART_Receive_IT(huart, &s_rx_byte, 1u);
 }
 
 void PidHelper_Poll(void)
 {
     uint32_t now;
+    unsigned int budget = PH_RX_BUDGET;
 
     if (s_huart == NULL) {
         return;
     }
 
     now = HAL_GetTick();
+    ph_tx_poll(now);
+    if (s_rx_overflow != 0u) {
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        s_rx_tail = s_rx_head;
+        s_rx_overflow = 0u;
+        __set_PRIMASK(primask);
+        PIDHelperProtocol_ResetRx(&s_proto);
+    }
+    while (budget-- > 0u && s_rx_overflow == 0u && s_rx_tail != s_rx_head) {
+        uint8_t byte = s_rx_queue[s_rx_tail];
+        s_rx_tail = (uint8_t)((s_rx_tail + 1u) % PH_RX_QUEUE_SIZE);
+        (void)PIDHelperProtocol_InputByte(&s_proto, byte);
+    }
+    ph_tx_poll(now);
 
     /* 20 ms 一帧遥测，上位机按 30 s / 600 点画图 */
     if ((uint32_t)(now - s_last_tx_tick) >= PH_TELEMETRY_PERIOD_MS) {
@@ -211,8 +284,11 @@ void PidHelper_Poll(void)
         telemetry.i = s_ki;
         telemetry.d = s_kd;
 
-        (void)PIDHelperProtocol_SendTelemetry(&s_proto, &telemetry);
+        /* 命令 ACK 优先；串口忙时丢弃遥测，不阻塞控制循环。 */
+        if (s_tx_head == s_tx_tail && s_tx_active == 0u)
+            (void)PIDHelperProtocol_SendTelemetry(&s_proto, &telemetry);
     }
+    ph_tx_poll(now);
 
     /* 接管期间长时间收不到命令：停车，但保持接管状态，
        不把控制权还给循迹，避免车子自己跑出去 */
@@ -225,6 +301,8 @@ void PidHelper_Poll(void)
     if ((s_huart->RxState != HAL_UART_STATE_READY) &&
         (s_huart->RxState != HAL_UART_STATE_BUSY_RX)) {
         (void)HAL_UART_AbortReceive(s_huart);
+    }
+    if (s_huart->RxState == HAL_UART_STATE_READY) {
         (void)HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1u);
     }
 }

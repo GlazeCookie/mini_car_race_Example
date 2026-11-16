@@ -89,6 +89,15 @@ void Error_Handler(void);
 #define MUX_3_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
+/* 故障时关闭 TIM1 两路电机输出；只在定时器时钟开启时访问外设。 */
+#define MOTOR_EMERGENCY_STOP() do { \
+  if ((RCC->APB2ENR & RCC_APB2ENR_TIM1EN) != 0U) { \
+    TIM1->CCER &= ~(TIM_CCER_CC1E | TIM_CCER_CC2E); \
+    TIM1->BDTR &= ~TIM_BDTR_MOE; \
+    TIM1->CCR1 = 0U; \
+    TIM1->CCR2 = 0U; \
+  } \
+} while (0)
 
 /* USER CODE END Private defines */
 

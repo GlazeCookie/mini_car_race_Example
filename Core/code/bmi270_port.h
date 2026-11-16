@@ -32,6 +32,9 @@ int8_t bmi270_set_config(struct bmi2_dev *dev);
  */
 int8_t bmi270_get_accel_gyro(struct bmi2_dev *dev, struct bmi2_sens_data *acc, struct bmi2_sens_data *gyr);
 
-void BMI270_SPI_DMA_TransferComplete_Callback(void);
+/**
+ * @brief 快速轮询读取 Z 轴陀螺仪原始值（仅 4 字节 SPI 传输，不读取加速度和辅助数据）
+ */
+int8_t bmi270_get_gyro_z_raw(SPI_HandleTypeDef *hspi, int16_t *gyro_z);
 
 #endif /* BMI270_PORT_H_ */

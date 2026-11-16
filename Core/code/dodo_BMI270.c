@@ -53,9 +53,12 @@ void dodo_BMI270_get_data(void){
         BMI270_gyro_x = 0;
         BMI270_gyro_y = 0;
         BMI270_gyro_z = 0;
+        BMI270_accel_x = 0;
+        BMI270_accel_y = 0;
+        BMI270_accel_z = 0;
         BMI270_last_rslt = -1;
         return; // 未初始化，直接返回
-    } // 未初始化，直接返回0
+    }
 
     int8_t rslt = bmi270_get_accel_gyro(&bmi270, &accel_data, &gyro_data);
     BMI270_last_rslt = rslt;
@@ -75,4 +78,21 @@ void dodo_BMI270_get_data(void){
         BMI270_accel_z = 0;
     }
     return;
+}
+
+int8_t dodo_BMI270_get_gyro_z(int16_t *gyro_z){
+    if (!BMI270_init_flag) {
+        BMI270_last_rslt = -1;
+        return -1;
+    }
+    int16_t val = 0;
+    int8_t rslt = bmi270_get_gyro_z_raw(&hspi1, &val);
+    BMI270_last_rslt = rslt;
+    if (rslt == BMI2_OK) {
+        BMI270_gyro_z = val;
+        if (gyro_z != NULL) {
+            *gyro_z = val;
+        }
+    }
+    return rslt;
 }

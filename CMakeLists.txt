@@ -30,7 +30,7 @@ target_include_directories(micro_smartcar PRIVATE
     Drivers/CMSIS/Device/ST/STM32F1xx/Include
     Drivers/CMSIS/Include
 )
-target_compile_options(micro_smartcar PRIVATE $<$<CONFIG:Debug>:-Og>)
+target_compile_options(micro_smartcar PRIVATE -O2)
 target_link_options(micro_smartcar PRIVATE
     "-T${CMAKE_SOURCE_DIR}/STM32F103C8TX_FLASH.ld"
     "-Wl,-Map=${CMAKE_BINARY_DIR}/micro_smartcar.map"

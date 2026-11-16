@@ -12,6 +12,7 @@ extern int8_t BMI270_last_rslt;
 
 int8_t dodo_BMI270_init();
 void dodo_BMI270_get_data(void);
+int8_t dodo_BMI270_get_gyro_z(int16_t *gyro_z);
 void dodo_BMI270_get_accel(void);
 
 #define BMI270_acc_transition(acc_value)      ((float)acc_value / BMI270_transition_factor[0])

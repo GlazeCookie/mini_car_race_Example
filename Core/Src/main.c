@@ -26,6 +26,7 @@
 #include "dodo_BMI270.h" //陀螺仪驱动
 #include "multiplexer.h" //多路复用器驱动，用于读取光电管读数
 #include "stdio.h"
+#include <math.h>
 #include "pid_helper_app.h" //PID Helper 上位机调参协议（USART3）
 #include "telemetry_stream.h" //双轮编码器 + 陀螺仪数据流（USART3，与调参互斥）
 #include "track_nav.h" // 赛道全遍历分段状态机（12路多簇 + BMI270 + 编码器）
@@ -36,56 +37,38 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 3 /* 0: 基础循迹；1: 编码器测试；2: 基础循迹遥测；3: 赛道全遍历模式 */
+#define ENCODER_TEST_MODE 4 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹 */
 #define ENCODER_TEST_PERIOD_MS 200U
 #define LINE_TELEMETRY_PERIOD_MS 100U
-#if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 3
-#error "ENCODER_TEST_MODE must be 0, 1, 2 or 3"
+#if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 6
+#error "ENCODER_TEST_MODE must be 0 through 6"
 #endif
+#define NAVIGATION_MODE (ENCODER_TEST_MODE >= 3 && ENCODER_TEST_MODE <= 5)
+#define PID_HELPER_IN_MODE (ENCODER_TEST_MODE != 4 && ENCODER_TEST_MODE != 5 && ENCODER_TEST_MODE != 6)
+#define BASIC_LINE_MODE (ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2 || ENCODER_TEST_MODE == 6)
 #define RUN_KEY_DEBOUNCE_MS 20U
-#define RUN_START_DELAY_MS  2000U
+#define RUN_START_DELAY_MS  1000U /* 按发车键后等待 1 秒发车 */
+#define RUN_KEY_SETTLE_MS   200U  /* 导航模式按键松手稳定延时（与 800 ms 陀螺仪标定合计 1 s） */
 /* 循迹和速度参数均需根据电机、编码器和赛道实车标定。 */
 #define LINE_ACTIVE_LEVEL  1U /* 白线输出高电平 */
 #define LINE_MAX_ACTIVE    12U
-#define LINE_PERIOD_MS     5U
-/* 转向修正系数随基准速度等比放大（2500 -> 12000 是 ×4.8），再针对折线急弯加强：
-   修正量 = LINE_KP×e + LINE_KP2×e×|e| + LINE_KD×Δe
-   基准 12000 时，修正量必须能超过 12000，内侧轮才可能降到 0（绕内轮支点急转）。
-   取 KP=700 / KP2=60：e=10 时修正 13000 -> 内侧轮归零；e=1 时只有 760（直道不画龙）。 */
-#define LINE_KP            700.0f  /* 每单位位置偏差对应的轮速修正，计数/秒 */
-#define LINE_KP2           60.0f   /* 大偏差时的二次加强，急弯靠它把内侧轮压到 0 */
-#define LINE_KD            80.0f   /* 相邻采样偏差之差的系数，抑制画龙 */
-/* 丢线后单轮寻线的 PWM。必须和巡航速度匹配：
-   带载 PWM = 200 + 0.010×转速，600 PWM 约等于 2.0 m/s，单轮转起来车体
-   角速度接近 950°/s，一找到线车头已经转过头了，表现为"跑反方向"。
-   降到 300 PWM ≈ 0.5 m/s，寻线时慢慢转，找到线能及时停下。 */
-#define LINE_SEARCH_PWM    300U    /* 丢线后单轮寻线 PWM，需实车调整 */
-/* 寻线时间随车速提高而延长：基准速度从 2500 提到 12000（约 4.8 倍）。
-   原来 500ms 在 0.13 m/s 下够用，但 0.6 m/s 时 0.5 秒已冲出 30cm，
-   超过就会双轮停死、再也恢复不了（环岛卡住就是这么来的）。
-   第二圈可能沿旧方向转错，暂时设为 1000 ms 验证，需根据实车情况调整。 */
-#define LINE_SEARCH_TIME_MS 1000U /* 最长寻线时间，超过后停车 */
-#define LINE_DIRECTION_MAX_AGE_MS 100U /* 最近偏差方向的有效期，需实车调整 */
-/* 实测每米约 19841 计数（左轮，人工推车 1 米标定）：
-     0.5 m/s ≈ 10000 计数/秒，1.0 m/s ≈ 20000，1.5 m/s ≈ 30000
-   原来的 2500 只有 0.13 m/s，整条速度标尺小了约 8 倍。 */
-#define SPEED_BASE_TARGET  14000.0f /* 直线目标轮速 ≈ 0.71 m/s */
-#define SPEED_MAX_TARGET   29000.0f /* 留足转向修正量：14000 + 最大修正 ≈ 29000 */
-/* 前馈 = 死区补偿 + 斜率 × 目标速度（只有目标 > 0 时才生效）。
-   实测带载巡航：目标 12000 时稳态 PWM ≈ 322，据此反算
-     FF(12000) = 200 + 0.010 × 12000 = 320 ≈ 322  ✓
-   这样巡航时积分器几乎不工作；弯道里内侧轮目标骤降时前馈能立刻跟着掉，
-   内侧轮才压得下来、差速才够（原来 OFFSET=300 太大，内侧轮压不下去，弯道往外推）。 */
+#define LINE_PERIOD_US     2000U /* 控制周期 2 ms (500 Hz)，基于 DWT->CYCCNT 精确触发 */
+#define LINE_KP            900.0f  /* 基础循迹位置环比例系数 */
+#define LINE_KP2           90.0f   /* 基础循迹大偏差二次项 */
+#define LINE_KD            0.55f   /* 基础循迹微分项（按 dt_s 归一化） */
+#define LINE_SEARCH_SPEED  28000.0f /* 基础循迹丢线寻线外轮速度 */
+#define LINE_SEARCH_REV_SPEED 12000.0f /* 基础循迹丢线寻线内轮反转速度 */
+#define LINE_SEARCH_SWEEP_MS 700U   /* 单向寻线超时后反向扫线 */
+#define SPEED_BASE_TARGET  28000.0f /* 基础循迹直线目标轮速 */
+#define SPEED_MAX_TARGET   55000.0f /* 基础循迹正向最高目标轮速 */
+#define SPEED_MAX_REV_TARGET 30000.0f /* 基础循迹内轮反转差速上限 */
 #define SPEED_FF_OFFSET    200.0f  /* 死区补偿 PWM */
 #define SPEED_FF_GAIN      0.010f  /* PWM / (计数每秒) */
-#define SPEED_MAX_PWM      4000.0f
-/* 以下增益由开环辨识 + 闭环阶跃搜索实测得出（空载，轮子悬空）：
-     目标 20000~30000 计数/秒：静差 1.1~1.4%，超调 0.9~2.7%，上升 ~170ms
-   注意：这是空载特性，上车带载后增益可按需再提高。 */
-#define SPEED_KP           0.0012f
-#define SPEED_KI           0.07f
+#define SPEED_MAX_PWM      7199.0f /* 满量程 PWM（对应 TIM1->ARR = 7199） */
+#define SPEED_KP           0.025f
+#define SPEED_KI           0.25f
 #define SPEED_KD           0.0f
-#define SPEED_INTEGRAL_LIMIT 1000.0f /* 积分项在 PWM 中的最大绝对贡献 */
+#define SPEED_INTEGRAL_LIMIT 2000.0f /* 积分项在 PWM 中的最大绝对贡献 */
 #define LEFT_ENCODER_SIGN  1
 #define RIGHT_ENCODER_SIGN (-1)
 /* USER CODE END PD */
@@ -186,7 +169,14 @@ static void MX_TIM4_Init(void);
 /* USER CODE END PFP */
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void DWT_Init(void) {
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  DWT->CYCCNT = 0U;
+}
+
 int fputc(int ch, FILE *f) {
+  (void)f;
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
@@ -200,15 +190,146 @@ static SpeedPid left_speed_pid;
 static SpeedPid right_speed_pid;
 static uint16_t previous_left_count;
 static uint16_t previous_right_count;
-#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
-static int8_t last_line_direction; /* -1 左，1 右，0 无法判断 */
-/* 最近一次明确方向只在误差非 0 时更新，并记录时间。
-   居中后短暂丢线可用它兜底；记录过旧时不再猜测方向。 */
-static int8_t last_valid_direction;
-static uint32_t last_valid_direction_tick;
-static int8_t line_search_direction; /* 本次丢线时锁定的寻线方向 */
+static int8_t left_motor_dir = 1;
+static int8_t right_motor_dir = 1;
+static uint16_t left_last_pwm = 0U;
+static uint16_t right_last_pwm = 0U;
+
+static uint16_t Motor_UpdateAxis(int32_t signed_pwm, GPIO_TypeDef *dir_port, uint16_t dir_pin,
+                                 int8_t *cur_dir, uint16_t *last_pwm) {
+  int32_t limit = (int32_t)SPEED_MAX_PWM;
+  if (signed_pwm > limit) signed_pwm = limit;
+  if (signed_pwm < -limit) signed_pwm = -limit;
+
+  if (signed_pwm == 0) {
+    *last_pwm = 0U;
+    return 0U;
+  }
+
+  int8_t want_dir = (signed_pwm > 0) ? 1 : -1;
+  uint16_t mag = (uint16_t)((signed_pwm > 0) ? signed_pwm : -signed_pwm);
+
+  if (want_dir != *cur_dir) {
+    /* 换向时给 1 个控制周期的零 PWM 死区，防止反接电流冲击拉垮供电。 */
+    if (*last_pwm != 0U) {
+      *last_pwm = 0U;
+      return 0U;
+    }
+    dir_port->BSRR = (want_dir > 0) ? ((uint32_t)dir_pin << 16U) : (uint32_t)dir_pin;
+    *cur_dir = want_dir;
+  }
+
+  *last_pwm = mag;
+  return mag;
+}
+
+static void Motor_SetOutput(int32_t left_pwm, int32_t right_pwm) {
+  TIM1->CCR1 = Motor_UpdateAxis(left_pwm, L_DIR_GPIO_Port, L_DIR_Pin,
+                                &left_motor_dir, &left_last_pwm);
+  TIM1->CCR2 = Motor_UpdateAxis(right_pwm, R_DIR_GPIO_Port, R_DIR_Pin,
+                                &right_motor_dir, &right_last_pwm);
+}
+
+static void Motor_StopAll(void) {
+  TIM1->CCR1 = 0U;
+  TIM1->CCR2 = 0U;
+  left_last_pwm = 0U;
+  right_last_pwm = 0U;
+  L_DIR_GPIO_Port->BSRR = (uint32_t)L_DIR_Pin << 16U;
+  R_DIR_GPIO_Port->BSRR = (uint32_t)R_DIR_Pin << 16U;
+  left_motor_dir = 1;
+  right_motor_dir = 1;
+}
+
+#if NAVIGATION_MODE
+static float previous_nav_left_target;
+static float previous_nav_right_target;
+#if ENCODER_TEST_MODE == 5 && !TELEMETRY_STREAM_ENABLE
+#define NAV_DIAG_QUEUE_SIZE 16U
+typedef struct {
+  uint32_t tick, dt_ms;
+  int32_t seg_mm, yaw10, left_target, right_target, left_speed, right_speed;
+  uint16_t mask, left_pwm, right_pwm;
+  uint8_t state, fault, fault_state, count, searching;
+  int8_t search_dir;
+} NavDiagSample;
+static NavDiagSample nav_diag_queue[NAV_DIAG_QUEUE_SIZE];
+static uint8_t nav_diag_head, nav_diag_tail, nav_diag_have_sample;
+static uint32_t nav_diag_last_tick, nav_diag_dropped;
+static uint16_t nav_diag_last_mask;
+static uint8_t nav_diag_last_state, nav_diag_last_fault, nav_diag_last_search;
+static int8_t nav_diag_last_dir;
+static int32_t nav_diag_left_speed, nav_diag_right_speed;
+static uint32_t nav_diag_dt_ms;
+static char nav_diag_buffer[224];
+
+/* 记录状态和光电管变化，串口中断忙时只排队，不等待发送。 */
+static void NavDiag_Poll(void) {
+  uint32_t now = HAL_GetTick();
+  uint8_t state = (uint8_t)TrackNav_GetState();
+  uint8_t fault = (uint8_t)TrackNav_GetFault();
+  uint16_t mask = TrackNav_GetLastLineMask();
+  uint8_t searching = TrackNav_IsSearching();
+  int8_t dir = TrackNav_GetSearchDirection();
+  uint8_t important = !nav_diag_have_sample || state != nav_diag_last_state || fault != nav_diag_last_fault;
+  uint8_t changed = important || mask != nav_diag_last_mask || searching != nav_diag_last_search || dir != nav_diag_last_dir;
+  if (important || (changed && (uint32_t)(now - nav_diag_last_tick) >= 10U) ||
+      (uint32_t)(now - nav_diag_last_tick) >= 100U) {
+    uint8_t next = (uint8_t)((nav_diag_head + 1U) % NAV_DIAG_QUEUE_SIZE);
+    NavDiagSample *sample;
+    if (next == nav_diag_tail) {
+      nav_diag_tail = (uint8_t)((nav_diag_tail + 1U) % NAV_DIAG_QUEUE_SIZE);
+      ++nav_diag_dropped;
+    }
+    sample = &nav_diag_queue[nav_diag_head];
+    sample->tick = now;
+    sample->dt_ms = nav_diag_dt_ms;
+    sample->state = state;
+    sample->fault = fault;
+    sample->fault_state = (uint8_t)TrackNav_GetFaultState();
+    sample->seg_mm = (int32_t)TrackNav_GetSegMm();
+    sample->yaw10 = (int32_t)(TrackNav_GetYawDeg() * 10.0f);
+    sample->mask = mask;
+    sample->count = TrackNav_GetLastLineCount();
+    sample->searching = searching;
+    sample->search_dir = dir;
+    sample->left_target = (int32_t)previous_nav_left_target;
+    sample->right_target = (int32_t)previous_nav_right_target;
+    sample->left_speed = nav_diag_left_speed;
+    sample->right_speed = nav_diag_right_speed;
+    sample->left_pwm = (uint16_t)TIM1->CCR1;
+    sample->right_pwm = (uint16_t)TIM1->CCR2;
+    nav_diag_head = next;
+    nav_diag_last_tick = now;
+    nav_diag_last_state = state;
+    nav_diag_last_fault = fault;
+    nav_diag_last_mask = mask;
+    nav_diag_last_search = searching;
+    nav_diag_last_dir = dir;
+    nav_diag_have_sample = 1U;
+  }
+  if (nav_diag_tail != nav_diag_head && huart3.gState == HAL_UART_STATE_READY) {
+    NavDiagSample *sample = &nav_diag_queue[nav_diag_tail];
+    int length = snprintf(nav_diag_buffer, sizeof(nav_diag_buffer),
+        "NAV,t=%lu,st=%u,f=%u,fs=%u,mm=%ld,yaw10=%ld,mask=%03X,n=%u,s=%u,d=%d,lt=%ld,rt=%ld,lv=%ld,rv=%ld,lp=%u,rp=%u,dt=%lu,drop=%lu,wd=0\r\n",
+        (unsigned long)sample->tick, (unsigned int)sample->state, (unsigned int)sample->fault,
+        (unsigned int)sample->fault_state, (long)sample->seg_mm, (long)sample->yaw10,
+        (unsigned int)sample->mask, (unsigned int)sample->count, (unsigned int)sample->searching,
+        (int)sample->search_dir, (long)sample->left_target, (long)sample->right_target,
+        (long)sample->left_speed, (long)sample->right_speed, (unsigned int)sample->left_pwm,
+        (unsigned int)sample->right_pwm, (unsigned long)sample->dt_ms, (unsigned long)nav_diag_dropped);
+    if (length > 0 && (unsigned int)length < sizeof(nav_diag_buffer) &&
+        HAL_UART_Transmit_IT(&huart3, (uint8_t *)nav_diag_buffer, (uint16_t)length) == HAL_OK)
+      nav_diag_tail = (uint8_t)((nav_diag_tail + 1U) % NAV_DIAG_QUEUE_SIZE);
+  }
+}
+#endif
+
+#endif
+#if BASIC_LINE_MODE
+static int8_t last_line_direction; /* -1 左，1 右，0 未知 */
+static int8_t line_search_direction;
 static uint8_t line_lost;
-static uint8_t line_search_expired;
 static uint32_t line_lost_tick;
 static float previous_line_error;
 static uint8_t has_previous_line_error;
@@ -278,22 +399,27 @@ static void SpeedPid_Reset(SpeedPid *pid) {
   pid->has_previous_error = 0U;
 }
 
-/* dt 为实际采样间隔（秒）；积分项限幅，并在输出饱和时抑制积分累积。 */
-static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float dt) {
-  /* 本车只支持单向 PWM；零目标立即关断并清除历史积分。 */
-  if (target <= 0.0f) {
-    SpeedPid_Reset(pid);
-    return 0U;
+/* 双向速度环：支持正/反转及反接主动制动，输出带符号 PWM [-SPEED_MAX_PWM, +SPEED_MAX_PWM] */
+static int32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float dt) {
+  if (fabsf(target) < 1.0f && fabsf(actual) <= 1000.0f) {
+    pid->integral *= 0.9f;
+    pid->previous_error = 0.0f;
+    pid->has_previous_error = 0U;
+    return 0;
   }
   float error = target - actual;
   float derivative = pid->has_previous_error ? (error - pid->previous_error) / dt : 0.0f;
   float candidate_integral = ClampFloat(pid->integral + PidHelper_Ki() * error * dt,
                                         -SPEED_INTEGRAL_LIMIT, SPEED_INTEGRAL_LIMIT);
-  /* 死区补偿 + 斜率前馈：目标为 0 时不加，避免停车时轮子还在爬 */
-  float feedforward = (target > 0.0f) ? (SPEED_FF_OFFSET + SPEED_FF_GAIN * target) : 0.0f;
+  float feedforward = 0.0f;
+  if (target >= 1.0f) {
+    feedforward = SPEED_FF_OFFSET + SPEED_FF_GAIN * target;
+  } else if (target <= -1.0f) {
+    feedforward = -(SPEED_FF_OFFSET + SPEED_FF_GAIN * (-target));
+  }
   float output = feedforward + PidHelper_Kp() * error + candidate_integral + PidHelper_Kd() * derivative;
 
-  if ((output <= SPEED_MAX_PWM || error < 0.0f) && (output >= 0.0f || error > 0.0f)) {
+  if ((output <= SPEED_MAX_PWM || error < 0.0f) && (output >= -SPEED_MAX_PWM || error > 0.0f)) {
     pid->integral = candidate_integral;
   }
   else {
@@ -301,11 +427,11 @@ static uint32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float
   }
   pid->previous_error = error;
   pid->has_previous_error = 1U;
-  return (uint32_t)ClampFloat(output, 0.0f, SPEED_MAX_PWM);
+  return (int32_t)ClampFloat(output, -SPEED_MAX_PWM, SPEED_MAX_PWM);
 }
 
 /* 光电管从左到右编号 0~11，位置权重为 -11、-9、...、9、11。 */
-#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
+#if BASIC_LINE_MODE
 static LineStatus Line_GetError(float *error) {
   uint16_t mux_value;
   int32_t position_sum = 0;
@@ -332,40 +458,44 @@ static LineStatus Line_GetError(float *error) {
 }
 #endif
 
-static void Line_FollowStep(uint32_t elapsed_ms) {
+static void Line_FollowStep(float dt) {
   float left_target;
   float right_target;
-#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
+  int32_t left_pwm;
+  int32_t right_pwm;
+#if BASIC_LINE_MODE
   float error;
   float correction;
-  float error_difference;
+  float error_rate;
   float abs_error;
-  float abs_error_diff;
+  float abs_diff_5ms;
   float severity;
   float speed_scale;
   float base_speed;
   LineStatus line_status;
 #endif
-  float dt = (float)elapsed_ms / 1000.0f;
   uint16_t left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   uint16_t right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
   int32_t left_delta = Encoder_Delta(left_count, previous_left_count) * LEFT_ENCODER_SIGN;
   int32_t right_delta = Encoder_Delta(right_count, previous_right_count) * RIGHT_ENCODER_SIGN;
   float left_speed = (float)left_delta / dt;
   float right_speed = (float)right_delta / dt;
+#if ENCODER_TEST_MODE == 5 && !TELEMETRY_STREAM_ENABLE
+  nav_diag_dt_ms = (uint32_t)(dt * 1000.0f + 0.5f);
+  nav_diag_left_speed = (int32_t)left_speed;
+  nav_diag_right_speed = (int32_t)right_speed;
+#endif
 
   previous_left_count = left_count;
   previous_right_count = right_count;
 
-#if PID_HELPER_ENABLE
+#if PID_HELPER_ENABLE && PID_HELPER_IN_MODE
   /* 上位机接管：跳过循迹，两轮以上位机下发的同一目标速度跑同一个速度环 */
   if (PidHelper_IsTuning()) {
-    uint32_t left_pwm;
-    uint32_t right_pwm;
     float pid_target = 0.0f;
 
     if (PidHelper_IsOpenMode()) {
-      left_pwm = (uint32_t)PidHelper_OpenOutput();
+      left_pwm = (int32_t)PidHelper_OpenOutput();
       right_pwm = left_pwm;
     }
     else {
@@ -374,27 +504,30 @@ static void Line_FollowStep(uint32_t elapsed_ms) {
       right_pwm = SpeedPid_Update(&right_speed_pid, pid_target, right_speed, dt);
     }
 
-    TIM1->CCR1 = left_pwm;
-    TIM1->CCR2 = right_pwm;
+    Motor_SetOutput(left_pwm, right_pwm);
     PidHelper_Report(left_speed, pid_target, (float)left_pwm);
     return;
   }
 #endif
-#if ENCODER_TEST_MODE == 3
+#if NAVIGATION_MODE
   if (TrackNav_Step(left_delta, right_delta, dt, &left_target, &right_target)) {
+    previous_nav_left_target = 0.0f;
+    previous_nav_right_target = 0.0f;
     SpeedPid_Reset(&left_speed_pid);
     SpeedPid_Reset(&right_speed_pid);
-    TIM1->CCR1 = 0U;
-    TIM1->CCR2 = 0U;
+    Motor_StopAll();
     PidHelper_Report(left_speed, 0.0f, 0.0f);
     return;
   }
-  TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
-  TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
-  PidHelper_Report(left_speed, left_target, (float)TIM1->CCR1);
+  previous_nav_left_target = left_target;
+  previous_nav_right_target = right_target;
+  left_pwm = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
+  right_pwm = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
+  Motor_SetOutput(left_pwm, right_pwm);
+  PidHelper_Report(left_speed, left_target, (float)left_pwm);
   return;
 #endif
-#if ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2
+#if BASIC_LINE_MODE
   line_status = Line_GetError(&error);
 #if ENCODER_TEST_MODE == 2
   line_telemetry.sample_tick = HAL_GetTick();
@@ -404,89 +537,58 @@ static void Line_FollowStep(uint32_t elapsed_ms) {
   if (line_status != LINE_FOUND) {
     uint32_t now = HAL_GetTick();
 
-    SpeedPid_Reset(&left_speed_pid);
-    SpeedPid_Reset(&right_speed_pid);
-
     has_previous_line_error = 0U;
-
-    /* 检测范围过宽时不猜测方向，立即停车。 */
-    if (line_status == LINE_TOO_WIDE) {
-      last_line_direction = 0;
-      last_valid_direction = 0;
-      line_search_direction = 0;
-      line_lost = 0U;
-      line_search_expired = 0U;
-    }
-    else if (!line_lost) {
+    if (!line_lost) {
       line_lost = 1U;
       line_lost_tick = now;
-      /* 只使用最近的有效方向，丢线后保持该方向直到找到线或超时。 */
-      line_search_direction = (last_valid_direction != 0 &&
-          (uint32_t)(now - last_valid_direction_tick) <= LINE_DIRECTION_MAX_AGE_MS)
-          ? last_valid_direction : 0;
-      line_search_expired = (line_search_direction == 0);
+      line_search_direction = (last_line_direction != 0) ? last_line_direction : 1;
+    } else if ((uint32_t)(now - line_lost_tick) >= LINE_SEARCH_SWEEP_MS) {
+      line_search_direction = (int8_t)(-line_search_direction);
+      line_lost_tick = now;
     }
 
-    if (line_lost && !line_search_expired &&
-        (uint32_t)(now - line_lost_tick) >= LINE_SEARCH_TIME_MS) {
-      line_search_expired = 1U;
-      last_valid_direction = 0;
-      line_search_direction = 0;
-    }
-
-    /* 单轮低速前进，另一轮停转；方向未知、过期或超时时停车。 */
-    TIM1->CCR1 = (line_status == LINE_LOST && !line_search_expired && line_search_direction > 0)
-                 ? LINE_SEARCH_PWM : 0U;
-    TIM1->CCR2 = (line_status == LINE_LOST && !line_search_expired && line_search_direction < 0)
-                 ? LINE_SEARCH_PWM : 0U;
+    /* 丢线时不停车，采用外轮正转+内轮反转高速扫线，超时后反向扫线 */
+    left_target = (line_search_direction > 0) ? LINE_SEARCH_SPEED : -LINE_SEARCH_REV_SPEED;
+    right_target = (line_search_direction < 0) ? LINE_SEARCH_SPEED : -LINE_SEARCH_REV_SPEED;
+    left_pwm = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
+    right_pwm = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
+    Motor_SetOutput(left_pwm, right_pwm);
 #if ENCODER_TEST_MODE == 2
-    line_telemetry.state = (line_status == LINE_TOO_WIDE) ? 'W' :
-                           (line_search_expired ? 'X' : 'S');
-    line_telemetry.error_x100 = 0; /* 无有效偏差，须结合状态判断 */
-    line_telemetry.left_target = 0; /* 寻线时直接输出 PWM，不使用速度目标 */
-    line_telemetry.right_target = 0;
+    line_telemetry.state = (line_status == LINE_TOO_WIDE) ? 'W' : 'S';
+    line_telemetry.error_x100 = 0;
+    line_telemetry.left_target = (int32_t)left_target;
+    line_telemetry.right_target = (int32_t)right_target;
     line_telemetry.left_pwm = TIM1->CCR1;
     line_telemetry.right_pwm = TIM1->CCR2;
 #endif
-    PidHelper_Report(left_speed, 0.0f, (float)TIM1->CCR1);
+    PidHelper_Report(left_speed, left_target, (float)left_pwm);
     return;
   }
 
   line_lost = 0U;
-  line_search_expired = 0U;
-  last_line_direction = (error > 0.0f) ? 1 : ((error < 0.0f) ? -1 : 0);
-  if (last_line_direction != 0) {
-    last_valid_direction = last_line_direction;
-    last_valid_direction_tick = HAL_GetTick();
-  }
-  error_difference = has_previous_line_error ? error - previous_line_error : 0.0f;
+  if (error > 0.3f) last_line_direction = 1;
+  else if (error < -0.3f) last_line_direction = -1;
+
+  error_rate = has_previous_line_error ? (error - previous_line_error) / dt : 0.0f;
   previous_line_error = error;
   has_previous_line_error = 1U;
   abs_error = (error < 0.0f) ? -error : error;
-  correction = LINE_KP * error + LINE_KP2 * error * abs_error + LINE_KD * error_difference;
-  /* 差分项可以减小转向，但不能让修正方向与当前白线偏差相反。 */
-  if ((error > 0.0f && correction < 0.0f) ||
-      (error < 0.0f && correction > 0.0f) || error == 0.0f)
-    correction = 0.0f;
+  correction = LINE_KP * error + LINE_KP2 * error * abs_error + LINE_KD * error_rate;
 
-  /* 弯道减速：偏差越大，两侧基础速度一起降（差速不变）。
-     差速决定转向的角速度，基础速度决定前进速度；只降前进速度就能减小转弯半径。
-     除了看偏差大小，还看偏差"变化多快"：压到直角弯口时偏差会突然跳变，
-     这一下就要收油，否则等偏差涨到最大再减速，车头已经过弯口了（0.7 m/s 下
-     轮子减速要 ~200ms，这 200ms 车已经前进 14cm）。 */
-  abs_error_diff = (error_difference < 0.0f) ? -error_difference : error_difference;
+  abs_diff_5ms = ((error_rate < 0.0f) ? -error_rate : error_rate) * 0.005f;
   severity = abs_error;
-  if (abs_error_diff * 2.5f > severity) severity = abs_error_diff * 2.5f;
+  if (abs_diff_5ms * 2.5f > severity) severity = abs_diff_5ms * 2.5f;
 
-  speed_scale = 1.0f - 0.16f * (severity - 3.0f);
+  speed_scale = 1.0f - 0.14f * (severity - 3.5f);
   if (speed_scale > 1.0f) speed_scale = 1.0f;
-  if (speed_scale < 0.22f) speed_scale = 0.22f; /* 最慢降到 0.22 倍 ≈ 0.16 m/s */
+  if (speed_scale < 0.30f) speed_scale = 0.30f;
   base_speed = SPEED_BASE_TARGET * speed_scale;
 
-  left_target = ClampFloat(base_speed + correction, 0.0f, SPEED_MAX_TARGET);
-  right_target = ClampFloat(base_speed - correction, 0.0f, SPEED_MAX_TARGET);
-  TIM1->CCR1 = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
-  TIM1->CCR2 = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
+  left_target = ClampFloat(base_speed + correction, -SPEED_MAX_REV_TARGET, SPEED_MAX_TARGET);
+  right_target = ClampFloat(base_speed - correction, -SPEED_MAX_REV_TARGET, SPEED_MAX_TARGET);
+  left_pwm = SpeedPid_Update(&left_speed_pid, left_target, left_speed, dt);
+  right_pwm = SpeedPid_Update(&right_speed_pid, right_target, right_speed, dt);
+  Motor_SetOutput(left_pwm, right_pwm);
 #if ENCODER_TEST_MODE == 2
   line_telemetry.state = 'F';
   line_telemetry.error_x100 = (int32_t)(error * 100.0f);
@@ -495,16 +597,18 @@ static void Line_FollowStep(uint32_t elapsed_ms) {
   line_telemetry.left_pwm = TIM1->CCR1;
   line_telemetry.right_pwm = TIM1->CCR2;
 #endif
-  PidHelper_Report(left_speed, left_target, (float)TIM1->CCR1);
+  PidHelper_Report(left_speed, left_target, (float)left_pwm);
 #endif
 }
 
-/* 发车键低电平按下；确认按下后等待 2 秒再开始循迹。 */
+/* 发车键低电平按下；导航模式下等待 200 ms 消抖后交由 TrackNav_Start 完成剩余 800 ms 标定，总计停 1 秒。 */
 static void WaitForRunKey(void) {
   for (;;) {
     /* 上电就开始发遥测：不按发车键也能架空轮子做静态验证（此时电机不动） */
+#if ENCODER_TEST_MODE != 6
     TelemetryStream_Poll();
-#if PID_HELPER_ENABLE
+#endif
+#if PID_HELPER_ENABLE && PID_HELPER_IN_MODE
     /* 上位机接管时不必等发车键；这里同时保持命令接收和遥测在线 */
     PidHelper_Poll();
     if (PidHelper_IsTuning()) {
@@ -522,7 +626,11 @@ static void WaitForRunKey(void) {
     }
   }
 
+#if NAVIGATION_MODE
+  HAL_Delay(RUN_KEY_SETTLE_MS);
+#else
   HAL_Delay(RUN_START_DELAY_MS);
+#endif
 }
 /* USER CODE END 0 */
 void Init_brushless_motor(void) {
@@ -549,7 +657,8 @@ void Init_brushless_motor(void) {
 int main(void) {
   /* USER CODE BEGIN 1 */
 #if ENCODER_TEST_MODE != 1
-  uint32_t last_control_tick;
+  uint32_t last_control_cyc;
+  uint32_t period_cyc;
 #if ENCODER_TEST_MODE == 2
   uint32_t last_telemetry_tick;
 #endif
@@ -566,6 +675,7 @@ int main(void) {
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  DWT_Init();
   /* USER CODE END SysInit */
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
@@ -587,27 +697,32 @@ int main(void) {
   /* USER CODE BEGIN 2 */
   /* 双轮编码器 + BMI270 陀螺仪数据流，20 Hz。与 PID Helper 互斥（都占 USART3），
      由 telemetry_stream.h 里的 TELEMETRY_STREAM_ENABLE 选择用哪个。 */
+#if ENCODER_TEST_MODE != 6
   TelemetryStream_Init(&huart3, LEFT_ENCODER_SIGN, RIGHT_ENCODER_SIGN);
-  /* PID Helper 调参协议挂在 USART3（PB10/PB11）；默认增益取编译期参数。
-     第 5 个参数是调参时允许的目标速度上限，单独给 30000，不改动循迹用的
-     SPEED_MAX_TARGET（那个宏循迹逻辑还在用）。 */
-  PidHelper_Init(&huart3, SPEED_KP, SPEED_KI, SPEED_KD, 30000.0f, SPEED_MAX_PWM);
+#endif
+  /* PID Helper 调参协议挂在 USART3（PB10/PB11）；默认增益取编译期参数。 */
+#if ENCODER_TEST_MODE == 4 || ENCODER_TEST_MODE == 5 || ENCODER_TEST_MODE == 6
+  /* 保留速度 PID 的默认增益，不启用 PID Helper 串口收发。 */
+  PidHelper_Init(NULL, SPEED_KP, SPEED_KI, SPEED_KD, TRACK_MAX_SPEED, SPEED_MAX_PWM);
+#else
+  PidHelper_Init(&huart3, SPEED_KP, SPEED_KI, SPEED_KD, TRACK_MAX_SPEED, SPEED_MAX_PWM);
+#endif
 #if ENCODER_TEST_MODE != 1 || TELEMETRY_STREAM_ENABLE
   dodo_BMI270_init(); // 初始化陀螺仪
-  /* BMI270 初始化也会启用光电管微秒延时所需的 DWT 计数器。 */
 #endif
 #if ENCODER_TEST_MODE != 1
   WaitForRunKey();
 #endif
-#if ENCODER_TEST_MODE == 3
+#if NAVIGATION_MODE
   TrackNav_Start();
 #endif
   previous_left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   previous_right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
 #if ENCODER_TEST_MODE != 1
-  last_control_tick = HAL_GetTick();
+  last_control_cyc = DWT->CYCCNT;
+  period_cyc = LINE_PERIOD_US * (SystemCoreClock / 1000000U);
 #if ENCODER_TEST_MODE == 2
-  last_telemetry_tick = last_control_tick;
+  last_telemetry_tick = HAL_GetTick();
 #endif
 #endif
   /* USER CODE END 2 */
@@ -642,14 +757,17 @@ int main(void) {
       HAL_UART_Transmit(&huart3, (uint8_t *)message, (uint16_t)length, 100U);
 #endif
 #else
-    uint32_t now = HAL_GetTick();
-    uint32_t elapsed_ms = now - last_control_tick;
-    if (elapsed_ms >= LINE_PERIOD_MS) {
-      last_control_tick = now;
-      Line_FollowStep(elapsed_ms);
+    uint32_t now_cyc = DWT->CYCCNT;
+    uint32_t elapsed_cyc = now_cyc - last_control_cyc;
+    if (elapsed_cyc >= period_cyc) {
+      float dt_s = (float)elapsed_cyc / (float)SystemCoreClock;
+      if (dt_s > 0.05f) dt_s = 0.05f;
+      last_control_cyc = now_cyc;
+      Line_FollowStep(dt_s);
 #if ENCODER_TEST_MODE == 2
-      if ((uint32_t)(now - last_telemetry_tick) >= LINE_TELEMETRY_PERIOD_MS) {
-        last_telemetry_tick = now;
+      uint32_t now_tick = HAL_GetTick();
+      if ((uint32_t)(now_tick - last_telemetry_tick) >= LINE_TELEMETRY_PERIOD_MS) {
+        last_telemetry_tick = now_tick;
 #if !PID_HELPER_ENABLE && !TELEMETRY_STREAM_ENABLE
         /* 调参协议或数据流占用同一个串口时，CSV 文本输出必须让位 */
         Line_SendTelemetry();
@@ -657,14 +775,18 @@ int main(void) {
       }
 #endif
     }
-    else {
-      HAL_Delay(1U);
-    }
 #endif
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
+#if PID_HELPER_IN_MODE
     PidHelper_Poll(); /* 20 ms 一帧遥测 + 串口接收兜底 */
+#endif
+#if ENCODER_TEST_MODE != 6
     TelemetryStream_Poll(); /* 50 ms 一帧：双轮增量 + 陀螺仪三轴 */
+#endif
+#if ENCODER_TEST_MODE == 5 && !TELEMETRY_STREAM_ENABLE
+    NavDiag_Poll();
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -775,6 +897,7 @@ static void MX_TIM1_Init(void) {
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
   if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN TIM1_Init 2 */
+  TIM1->CCMR1 |= TIM_CCMR1_OC1PE | TIM_CCMR1_OC2PE;
   /* USER CODE END TIM1_Init 2 */
   HAL_TIM_MspPostInit(&htim1);
 }
@@ -967,14 +1090,14 @@ static void MX_GPIO_Init(void) {
   GPIO_InitStruct.Pin = L_DIR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(L_DIR_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : R_DIR_Pin PA11 */
   GPIO_InitStruct.Pin = R_DIR_Pin | GPIO_PIN_11;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : MUX_READ_Pin */
@@ -1010,6 +1133,7 @@ static void MX_GPIO_Init(void) {
 void Error_Handler(void) {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  MOTOR_EMERGENCY_STOP();
   __disable_irq();
   while (1) {
   }

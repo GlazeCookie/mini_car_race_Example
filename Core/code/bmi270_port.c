@@ -2,138 +2,75 @@
 
 static SPI_HandleTypeDef *bmi2_hspi = NULL;
 
-// CS 引脚控制宏
-#define BMI270_CS_LOW()     HAL_GPIO_WritePin(BMI270_CS_GPIO_Port, BMI270_CS_Pin, GPIO_PIN_RESET)
-#define BMI270_CS_HIGH()    HAL_GPIO_WritePin(BMI270_CS_GPIO_Port, BMI270_CS_Pin, GPIO_PIN_SET)
-
-static volatile uint8_t spi_dma_tx_rx_complete = 0;
-
-/* 有上限地等待 DMA 完成。
-   原来的 while (spi_dma_tx_rx_complete == 0) {} 没有超时：SPI 一旦没响应
-   （排线松动、干扰、模块掉电），主循环会永久卡死，电机带着最后的 PWM 一直转。
-   现在最多等 timeout_ms，超时就中止传输并返回错误，上层会把数据标记为无效。 */
-#define BMI270_DMA_TIMEOUT_MS 5u
-
-static int bmi270_wait_dma(uint32_t timeout_ms)
-{
-    uint32_t start = HAL_GetTick();
-
-    while (spi_dma_tx_rx_complete == 0) {
-        if ((uint32_t)(HAL_GetTick() - start) > timeout_ms) {
-            return -1;
-        }
-    }
-    return 0;
-}
+// CS 引脚控制宏（BSRR 直接置位/复位）
+#define BMI270_CS_LOW()     (BMI270_CS_GPIO_Port->BSRR = ((uint32_t)BMI270_CS_Pin << 16U))
+#define BMI270_CS_HIGH()    (BMI270_CS_GPIO_Port->BSRR = (uint32_t)BMI270_CS_Pin)
+#define BMI270_SPI_BUF_SIZE 260U
+#define BMI270_SPI_TIMEOUT_MS 5U
 
 /**
- * @brief SPI 读函数 (DMA)
+ * @brief SPI 读函数 (同步轮询，避免 DMA 中断与大缓存开销)
  */
 BMI2_INTF_RETURN_TYPE bmi2_spi_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr)
 {
-    if (bmi2_hspi == NULL) {
+    (void)intf_ptr;
+    if (bmi2_hspi == NULL || reg_data == NULL) {
         return BMI2_E_NULL_PTR;
     }
 
-    reg_addr |= 0x80;
-    
-    static uint8_t tx_buf[2048];
-    static uint8_t rx_buf[2048];
-    if ((len + 1) > sizeof(tx_buf)) {
+    static uint8_t tx_buf[BMI270_SPI_BUF_SIZE];
+    static uint8_t rx_buf[BMI270_SPI_BUF_SIZE];
+    if ((len + 1U) > sizeof(tx_buf)) {
         return BMI2_E_COM_FAIL;
     }
 
-    tx_buf[0] = reg_addr;
-
-    spi_dma_tx_rx_complete = 0;
+    tx_buf[0] = (uint8_t)(reg_addr | 0x80U);
+    for (uint32_t i = 0U; i < len; ++i) {
+        tx_buf[i + 1U] = 0U;
+    }
 
     BMI270_CS_LOW();
-
-    if (HAL_SPI_TransmitReceive_DMA(bmi2_hspi, tx_buf, rx_buf, len + 1) != HAL_OK) {
+    if (HAL_SPI_TransmitReceive(bmi2_hspi, tx_buf, rx_buf, (uint16_t)(len + 1U), BMI270_SPI_TIMEOUT_MS) != HAL_OK) {
         BMI270_CS_HIGH();
         return BMI2_E_COM_FAIL;
     }
-
-    if (bmi270_wait_dma(BMI270_DMA_TIMEOUT_MS) != 0) {
-        (void)HAL_SPI_Abort(bmi2_hspi);
-        BMI270_CS_HIGH();
-        return BMI2_E_COM_FAIL;
-    }
-
     BMI270_CS_HIGH();
-    
-    for (uint32_t i = 0; i < len; i++) {
-        reg_data[i] = rx_buf[i + 1];
+
+    for (uint32_t i = 0U; i < len; ++i) {
+        reg_data[i] = rx_buf[i + 1U];
     }
 
     return BMI2_OK;
 }
 
 /**
- * @brief SPI 写函数 (DMA)
+ * @brief SPI 写函数 (同步轮询)
  */
 BMI2_INTF_RETURN_TYPE bmi2_spi_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr)
 {
-    if (bmi2_hspi == NULL) {
+    (void)intf_ptr;
+    if (bmi2_hspi == NULL || reg_data == NULL) {
         return BMI2_E_NULL_PTR;
     }
 
-    reg_addr &= 0x7F;
-    
-    static uint8_t tx_buf[4096];
-    if ((len + 1) > sizeof(tx_buf)) {
+    static uint8_t tx_buf[BMI270_SPI_BUF_SIZE];
+    if ((len + 1U) > sizeof(tx_buf)) {
         return BMI2_E_COM_FAIL;
     }
-    
-    tx_buf[0] = reg_addr;
-    for(uint32_t i=0; i<len; i++) {
-        tx_buf[i+1] = reg_data[i];
+
+    tx_buf[0] = (uint8_t)(reg_addr & 0x7FU);
+    for (uint32_t i = 0U; i < len; ++i) {
+        tx_buf[i + 1U] = reg_data[i];
     }
-    
-    spi_dma_tx_rx_complete = 0;
-    
+
     BMI270_CS_LOW();
-
-    if (HAL_SPI_Transmit_DMA(bmi2_hspi, tx_buf, len + 1) != HAL_OK) {
-        BMI270_CS_HIGH();
-        return BMI2_E_COM_FAIL;
-    }else{
-    }
-
-    if (bmi270_wait_dma(BMI270_DMA_TIMEOUT_MS) != 0) {
-        (void)HAL_SPI_Abort(bmi2_hspi);
+    if (HAL_SPI_Transmit(bmi2_hspi, tx_buf, (uint16_t)(len + 1U), BMI270_SPI_TIMEOUT_MS) != HAL_OK) {
         BMI270_CS_HIGH();
         return BMI2_E_COM_FAIL;
     }
-
     BMI270_CS_HIGH();
 
     return BMI2_OK;
-}
-
-
-/**
- * @brief SPI DMA 传输完成的回调函数
- * @note  这个函数是 HAL 库提供的标准回调，当任何 SPI 的 DMA 传输完成时，
- *        并且 SPI 中断被使能，它就会被自动调用。
- */
-void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
-{
-    // 确保是SPI1完成了传输
-    if (hspi->Instance == SPI1)
-    {
-        // 置位完成标志
-        spi_dma_tx_rx_complete = 1;
-    }
-}
-
-// 如果只调用了 Transmit_DMA，则会触发这个回调
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
-{
-    if (hspi->Instance == SPI1)
-    {
-        spi_dma_tx_rx_complete = 1;
-    }
 }
 
 /**
@@ -144,8 +81,9 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
  */
 void bmi2_delay_us(uint32_t period, void *intf_ptr)
 {
+    (void)intf_ptr;
     uint32_t start = DWT->CYCCNT;
-    uint32_t ticks = period * (SystemCoreClock / 1000000);
+    uint32_t ticks = period * (SystemCoreClock / 1000000U);
     while ((DWT->CYCCNT - start) < ticks);
 }
 
@@ -178,7 +116,7 @@ int8_t bmi270_sensor_init_spi(struct bmi2_dev *dev, SPI_HandleTypeDef *hspi)
     dev->write = bmi2_spi_write;
     dev->delay_us = bmi2_delay_us;
     dev->intf_ptr = NULL; 
-    dev->read_write_len = 2048; 
+    dev->read_write_len = 256; 
     dev->config_file_ptr = NULL; 
     
     // 根据BMI270数据手册，SPI接口在初始化时需要一个dummy read来进入SPI模式
@@ -252,4 +190,24 @@ int8_t bmi270_get_accel_gyro(struct bmi2_dev *dev, struct bmi2_sens_data *acc, s
         *gyr = sensor_data;
     }
     return rslt;
+}
+
+int8_t bmi270_get_gyro_z_raw(SPI_HandleTypeDef *hspi, int16_t *gyro_z)
+{
+    uint8_t tx[4] = { (uint8_t)((BMI2_GYR_X_LSB_ADDR + 4U) | 0x80U), 0U, 0U, 0U };
+    uint8_t rx[4] = { 0U, 0U, 0U, 0U };
+
+    if (hspi == NULL || gyro_z == NULL) {
+        return BMI2_E_NULL_PTR;
+    }
+
+    BMI270_CS_LOW();
+    if (HAL_SPI_TransmitReceive(hspi, tx, rx, 4U, 2U) != HAL_OK) {
+        BMI270_CS_HIGH();
+        return BMI2_E_COM_FAIL;
+    }
+    BMI270_CS_HIGH();
+
+    *gyro_z = (int16_t)(((uint16_t)rx[3] << 8U) | (uint16_t)rx[2]);
+    return BMI2_OK;
 }

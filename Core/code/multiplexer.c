@@ -9,33 +9,22 @@
  */
 void multiplexer_delay_us(uint32_t period, void *intf_ptr)
 {
+    (void)intf_ptr;
+    if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U) {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
     uint32_t start = DWT->CYCCNT;
-    uint32_t ticks = period * (SystemCoreClock / 1000000);
+    uint32_t ticks = period * (SystemCoreClock / 1000000U);
     while ((DWT->CYCCNT - start) < ticks);
 }
 
 int16_t multiplexer_set_channel(int16_t channel){
     if(channel<0||channel>15) return -1; // 通道号错误，返回-1
-    if((channel&1)==0){
-        HAL_GPIO_WritePin(MULTIPLEXER_0_PORT, MULTIPLEXER_0_PIN, GPIO_PIN_RESET);
-    }else{
-        HAL_GPIO_WritePin(MULTIPLEXER_0_PORT, MULTIPLEXER_0_PIN, GPIO_PIN_SET);
-    }
-    if(((channel>>1)&1)==0){
-        HAL_GPIO_WritePin(MULTIPLEXER_1_PORT, MULTIPLEXER_1_PIN, GPIO_PIN_RESET);
-    }else{
-        HAL_GPIO_WritePin(MULTIPLEXER_1_PORT, MULTIPLEXER_1_PIN, GPIO_PIN_SET);
-    }
-    if(((channel>>2)&1)==0){
-        HAL_GPIO_WritePin(MULTIPLEXER_2_PORT, MULTIPLEXER_2_PIN, GPIO_PIN_RESET);
-    }else{
-        HAL_GPIO_WritePin(MULTIPLEXER_2_PORT, MULTIPLEXER_2_PIN, GPIO_PIN_SET);
-    }
-    if(((channel>>3)&1)==0){
-        HAL_GPIO_WritePin(MULTIPLEXER_3_PORT, MULTIPLEXER_3_PIN, GPIO_PIN_RESET);
-    }else{
-        HAL_GPIO_WritePin(MULTIPLEXER_3_PORT, MULTIPLEXER_3_PIN, GPIO_PIN_SET);
-    }
+    MULTIPLEXER_0_PORT->BSRR = ((channel & 1) != 0) ? (uint32_t)MULTIPLEXER_0_PIN : ((uint32_t)MULTIPLEXER_0_PIN << 16U);
+    MULTIPLEXER_1_PORT->BSRR = (((channel >> 1) & 1) != 0) ? (uint32_t)MULTIPLEXER_1_PIN : ((uint32_t)MULTIPLEXER_1_PIN << 16U);
+    MULTIPLEXER_2_PORT->BSRR = (((channel >> 2) & 1) != 0) ? (uint32_t)MULTIPLEXER_2_PIN : ((uint32_t)MULTIPLEXER_2_PIN << 16U);
+    MULTIPLEXER_3_PORT->BSRR = (((channel >> 3) & 1) != 0) ? (uint32_t)MULTIPLEXER_3_PIN : ((uint32_t)MULTIPLEXER_3_PIN << 16U);
     return 0;
 }
 
@@ -44,12 +33,13 @@ int16_t multiplexer_set_channel(int16_t channel){
  * @param[out] value 指向存储读取值的变量的指针
  */
 void MUX_get_value(uint16_t *value){
-    *value=0;
+    uint16_t result = 0U;
     for(int16_t i=0;i<MULTIPLEXER_CHANNEL_NUM;i++){
         multiplexer_set_channel(i);
-        multiplexer_delay_us(1,NULL);
-        if(HAL_GPIO_ReadPin(MULTIPLEXER_READ_PORT,MULTIPLEXER_READ_PIN)==GPIO_PIN_SET){
-            (*value)+=(1<<(MULTIPLEXER_CHANNEL_NUM-i-1));
+        multiplexer_delay_us(1U,NULL);
+        if((MULTIPLEXER_READ_PORT->IDR & MULTIPLEXER_READ_PIN) != 0U){
+            result |= (uint16_t)(1U << (MULTIPLEXER_CHANNEL_NUM - i - 1));
         }
     }
+    *value = result;
 }

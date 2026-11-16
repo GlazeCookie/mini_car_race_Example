@@ -3,17 +3,21 @@
 
 #include <stdint.h>
 
-/* 每米编码器计数（沿用 main.c 最新标定值 37188；换地/换轮后只需改这一处） */
-#define TRACK_COUNTS_PER_METER 37188.0f
+/* 每米编码器计数；右轮尚未单独标定，暂用左轮值。 */
+#define TRACK_LEFT_COUNTS_PER_METER  37188.0f
+#define TRACK_RIGHT_COUNTS_PER_METER 37188.0f
 
-/* 赛道巡线基础参数（可在实车调试时微调） */
-#define TRACK_BASE_SPEED       12000.0f  /* 常规巡线目标轮速 (counts/s) */
-#define TRACK_ZIGZAG_SPEED     7800.0f   /* 锯齿急弯段限速 (counts/s) */
-#define TRACK_HEX_SPEED        9000.0f   /* 六边形/八边形环岛速度 (counts/s) */
-#define TRACK_CROSS_SPEED      10500.0f  /* 过十字/T口直行速度 (counts/s) */
-#define TRACK_BROKEN_SPEED     9500.0f   /* 过断路区域盲走速度 (counts/s) */
-#define TRACK_TURN_OUTER_SPEED 6800.0f   /* 差速定角转向时外轮目标速度 (counts/s) */
-#define TRACK_MAX_SPEED        29000.0f
+/* 赛道巡线与竞速参数（实车支持双向调速与反接制动） */
+#define TRACK_BASE_SPEED           32000.0f  /* 常规/直道巡线目标轮速 (counts/s) */
+#define TRACK_ZIGZAG_SPEED         24000.0f  /* 锯齿急弯段目标轮速 (counts/s) */
+#define TRACK_HEX_SPEED            25000.0f  /* 六边形/八边形环岛速度 (counts/s) */
+#define TRACK_HEX_R_SPEED          22000.0f  /* 右中 200 六边形速度 (counts/s) */
+#define TRACK_CROSS_SPEED          26000.0f  /* 过十字/T口直行速度 (counts/s) */
+#define TRACK_BROKEN_SPEED         18000.0f  /* 过断路区域盲走速度 (counts/s) */
+#define TRACK_TURN_OUTER_SPEED     22000.0f  /* 差速定角转向时外轮目标速度 (counts/s) */
+#define TRACK_TURN_INNER_REV_SPEED 12000.0f  /* 差速定角转向时内轮反转速度幅值 (counts/s) */
+#define TRACK_MAX_SPEED            65000.0f  /* 正向最高目标速度 (counts/s) */
+#define TRACK_MAX_REV_SPEED        35000.0f  /* 反向差速/反接制动最高速度幅值 (counts/s) */
 
 /* 12 路光电管单簇信息 */
 typedef struct {
@@ -88,18 +92,41 @@ typedef enum {
   TRK_FAULT_STOP           /* 陀螺仪或异常保护停车 */
 } TrackState;
 
+typedef enum {
+  TRACK_FAULT_NONE = 0,
+  TRACK_FAULT_GYRO_INIT,
+  TRACK_FAULT_GYRO_READ,
+  TRACK_FAULT_GYRO_MOVED,
+  TRACK_FAULT_GAP_NOT_FOUND,   /* 预留；比赛策略继续扫线 */
+  TRACK_FAULT_GAP_ALIGN,       /* 预留；比赛策略返回扫线 */
+  TRACK_FAULT_TURN_TIMEOUT,
+  TRACK_FAULT_TURN_NO_PROGRESS,
+  TRACK_FAULT_TURN_WRONG_DIRECTION,
+  TRACK_FAULT_BRANCH_MISSED,   /* 预留；比赛策略继续找分叉 */
+  TRACK_FAULT_STATE_LIMIT,     /* 预留；比赛策略不设通用状态距离上限 */
+  TRACK_FAULT_LEFT_ENCODER,
+  TRACK_FAULT_RIGHT_ENCODER
+} TrackFault;
+
 /* 初始化并静止标定 BMI270 零偏（请在发车延时后或发车前静止调用） */
 void TrackNav_Start(void);
 
 /* 12 路簇解析工具函数（可供其他模式复用） */
 void TrackNav_ScanLine(uint8_t active_level, LineScanResult *scan);
 
-/* 每 5 ms 控制步调用：输出左右轮目标速度（counts/s），返回 1 表示应停车归零 PWM */
+/* 每个控制步调用：输出左右轮目标速度（counts/s），返回 1 表示应停车归零 PWM */
 uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
                       float *out_left_target, float *out_right_target);
 
 TrackState TrackNav_GetState(void);
 float TrackNav_GetYawDeg(void);
 float TrackNav_GetSegMm(void);
+TrackFault TrackNav_GetFault(void);
+TrackState TrackNav_GetFaultState(void);
+uint16_t TrackNav_GetLastLineMask(void);
+uint8_t TrackNav_GetLastLineCount(void);
+uint8_t TrackNav_IsSearching(void);
+int8_t TrackNav_GetSearchDirection(void);
+void TrackNav_Abort(TrackFault fault);
 
 #endif /* TRACK_NAV_H */
