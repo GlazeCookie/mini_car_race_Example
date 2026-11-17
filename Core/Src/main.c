@@ -37,7 +37,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 4 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹 */
+#define ENCODER_TEST_MODE 5 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹 */
 #define ENCODER_TEST_PERIOD_MS 200U
 #define LINE_TELEMETRY_PERIOD_MS 100U
 #if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 6
@@ -53,15 +53,15 @@
 #define LINE_ACTIVE_LEVEL  1U /* 白线输出高电平 */
 #define LINE_MAX_ACTIVE    12U
 #define LINE_PERIOD_US     2000U /* 控制周期 2 ms (500 Hz)，基于 DWT->CYCCNT 精确触发 */
-#define LINE_KP            900.0f  /* 基础循迹位置环比例系数 */
-#define LINE_KP2           90.0f   /* 基础循迹大偏差二次项 */
-#define LINE_KD            0.55f   /* 基础循迹微分项（按 dt_s 归一化） */
-#define LINE_SEARCH_SPEED  28000.0f /* 基础循迹丢线寻线外轮速度 */
-#define LINE_SEARCH_REV_SPEED 12000.0f /* 基础循迹丢线寻线内轮反转速度 */
-#define LINE_SEARCH_SWEEP_MS 700U   /* 单向寻线超时后反向扫线 */
-#define SPEED_BASE_TARGET  28000.0f /* 基础循迹直线目标轮速 */
-#define SPEED_MAX_TARGET   55000.0f /* 基础循迹正向最高目标轮速 */
-#define SPEED_MAX_REV_TARGET 30000.0f /* 基础循迹内轮反转差速上限 */
+#define LINE_KP            1100.0f /* 基础循迹位置环比例系数 */
+#define LINE_KP2           110.0f  /* 基础循迹大偏差二次项 */
+#define LINE_KD            1.30f   /* 基础循迹微分项（按 dt_s 归一化） */
+#define LINE_SEARCH_SPEED  24000.0f /* 基础循迹丢线寻线外轮速度 */
+#define LINE_SEARCH_REV_SPEED 8000.0f /* 基础循迹丢线寻线内轮反转速度 */
+#define LINE_SEARCH_SWEEP_MS 1500U   /* 坚持按上次方向寻线 1.5 s 后才反向兜底 */
+#define SPEED_BASE_TARGET  36000.0f /* 基础循迹直线目标轮速 */
+#define SPEED_MAX_TARGET   70000.0f /* 基础循迹正向最高目标轮速 */
+#define SPEED_MAX_REV_TARGET 10000.0f /* 基础循迹内轮温和反转上限，防止急弯甩过掉头 */
 #define SPEED_FF_OFFSET    200.0f  /* 死区补偿 PWM */
 #define SPEED_FF_GAIN      0.010f  /* PWM / (计数每秒) */
 #define SPEED_MAX_PWM      7199.0f /* 满量程 PWM（对应 TIM1->ARR = 7199） */
@@ -566,8 +566,12 @@ static void Line_FollowStep(float dt) {
   }
 
   line_lost = 0U;
-  if (error > 0.3f) last_line_direction = 1;
-  else if (error < -0.3f) last_line_direction = -1;
+  if (error >= 2.0f) last_line_direction = 1;
+  else if (error <= -2.0f) last_line_direction = -1;
+  else if (last_line_direction == 0) {
+    if (error > 0.5f) last_line_direction = 1;
+    else if (error < -0.5f) last_line_direction = -1;
+  }
 
   error_rate = has_previous_line_error ? (error - previous_line_error) / dt : 0.0f;
   previous_line_error = error;
