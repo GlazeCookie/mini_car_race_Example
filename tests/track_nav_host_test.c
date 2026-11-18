@@ -180,12 +180,30 @@ static void test_square_and_hex_r_transitions(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_ENTER);
 
-  /* 六边形绕完 ~860mm 遇出口叉口 0x1C3 切入 HEX_R_EXIT；若已超 -325° 则直接进 APPROACH_OCT 并正常右转 0x0FF */
-  setup(TRK_HEX_R_LOOP); s_seg_mm = 860.0f; s_yaw_seg = -275.0f; mock_line = 0x1C3;
+  /* 第 5 角单线宽块 0xFE0 (895mm, -245°) 不得提前触发 HEX_R_EXIT；真实分叉 0x1CF->0x0FE 在 <=-275° 连贯切出；六边形自身与刚切上 330 (<220mm) 时不启用 90° 猛反甩锁存 */
+  setup(TRK_HEX_R_LOOP); s_seg_mm = 895.0f; s_yaw_seg = -245.0f; mock_line = 0xFE0;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP && s_corner_latch_ms == 0U);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP && s_corner_latch_ms == 0U);
+
+  setup(TRK_HEX_R_LOOP); s_yaw_ref = 170.0f; s_seg_mm = 860.0f; s_yaw_seg = -275.0f; s_yaw_deg = -140.0f;
+  mock_line = 0x1CF;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP);
+  mock_line = 0x0FE;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT);
 
-  setup(TRK_HEX_R_LOOP); s_seg_mm = 1000.0f; s_yaw_seg = -330.0f; mock_line = 0x0FF;
+  /* HEX_R_EXIT 前 65mm 在 320mm 回流口左咬 (0x1CF->r>l)，65~195mm 再过 420mm 入环分叉 (0xF0C) 时改取右簇 (l>r) 直出 330，走足 195mm 且对齐航向后进 APPROACH_OCT */
+  s_seg_mm = 30.0f; s_yaw_deg = -142.0f; mock_line = 0x1CF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT && r > l);
+  s_seg_mm = 115.0f; s_yaw_deg = -174.0f; mock_line = 0xF0C; /* 左 ch0..3 回环 vs 右 ch8..9 直出 330 */
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT && l > r);
+  s_seg_mm = 185.0f; s_yaw_deg = -175.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT);
+  s_seg_mm = 200.0f; s_yaw_deg = -175.0f; mock_line = 0x1CF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT);
+  mock_line = 0xFE0;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT && s_corner_latch_ms == 0U);
+
+  setup(TRK_HEX_R_LOOP); s_seg_mm = 1000.0f; s_yaw_seg = -350.0f; mock_line = 0x0FF;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT && l > r);
 
   /* 左下 200 六边形：单线弯 0x03C 不误触发；60° 交叉口 0x0E7 直行切入 -> 过滤第 5 角 0x7E0 -> 回原点 0x0E7 直行穿出 */
@@ -301,12 +319,12 @@ static void test_search_never_stops(void) {
 static void test_follow_line_cascade(void) {
   float l0, r0, l_fast, r_fast, l_exit, r_exit;
 
-  /* 极端外沿偏差 (+11.0) 下目标角速度被外环钳位在 320 °/s，且当实测角速度超限时差速自动收缩 */
+  /* 极端外沿偏差 (+11.0) 下目标角速度被外环钳位在 NAV_FOLLOW_MAX_RATE_DPS，且当实测角速度超限时差速自动收缩 */
   setup(TRK_SQ_RM_LOOP);
   mock_line = 0x001; /* ch 11 -> +11.0 */
   assert(step(0, 0, &l0, &r0) == 0U && l0 > r0 && r0 >= -NAV_FOLLOW_MAX_REV_SPEED);
 
-  mock_gyro = -6560; /* 对应 +400 °/s 顺时针旋转 */
+  mock_gyro = -9840; /* 对应 +600 °/s 顺时针旋转 (> 495 °/s) */
   for (int i = 0; i < 8; ++i) {
     assert(step(0, 0, &l_fast, &r_fast) == 0U);
   }
@@ -332,6 +350,46 @@ static void test_follow_line_cascade(void) {
   assert(step(0, 0, &l_norm, &r_norm) == 0U && l_norm > r_norm && l_norm > 0.0f);
 }
 
+static void test_corner_latch_and_in_place_search(void) {
+  float l, r;
+
+  /* 双向十字 0x3FF / 0xFFF 与双簇六边形口 0x0E7 不得误触发单侧 90° 锁存 */
+  setup(TRK_SQ_RM_LOOP); mock_line = 0x3FF;
+  assert(step(0, 0, &l, &r) == 0U && s_corner_latch_ms == 0U);
+  mock_line = 0xFFF;
+  assert(step(0, 0, &l, &r) == 0U && s_corner_latch_ms == 0U);
+  mock_line = 0x0E7;
+  assert(step(0, 0, &l, &r) == 0U && s_corner_latch_ms == 0U);
+
+  /* 右中方框压上右侧 90° 折角 0x07F -> 立即向右锁定并用更强内轮反转反甩，不会因下一拍中心单灯 0x040 残留反向掰直 */
+  setup(TRK_SQ_RM_LOOP); s_seg_mm = 656.0f;
+  mock_line = 0x07F; /* ch 5..11 */
+  assert(step(0, 0, &l, &r) == 0U && s_corner_dir == 1 && s_corner_latch_ms > 0U);
+  assert(s_last_dir == 1 && l > r && r < -NAV_FOLLOW_MAX_REV_SPEED);
+
+  mock_line = 0x07C; /* 离角瞬间外侧先脱线剩 width=5 (0x07C) 仍维持右转锁定，不提前放开 */
+  assert(step(0, 0, &l, &r) == 0U && s_corner_dir == 1 && s_corner_latch_ms > 0U && l > r && r < 0.0f);
+
+  mock_line = 0x040; /* 离角前瞬间中心单灯残留 (-1.0) 仍被右拐锁定滤除，不翻向也不左打 */
+  assert(step(0, 0, &l, &r) == 0U && s_corner_dir == 1 && s_last_dir == 1 && l > r && r < 0.0f);
+
+  /* 紧接着冲出角尖丢线 0x000 -> 锁死向右原点纯旋转寻线（内轮满反刹、无正向前推） */
+  mock_line = 0x000;
+  assert(step(0, 0, &l, &r) == 0U && s_search_active && s_search_dir == 1 && s_search_fwd_spd == 0.0f);
+  assert(l > 0.0f && r <= -TRACK_MAX_REV_SPEED + 1.0f && 0.5f * (l + r) < 6000.0f);
+
+  /* 只要后续踩回常规多灯直道 0x060（不必死等 48°），立即释放折角锁存并恢复满速巡线 */
+  setup(TRK_SQ_RM_LOOP); mock_line = 0x07F;
+  assert(step(0, 0, &l, &r) == 0U && s_corner_latch_ms > 0U);
+  mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && s_corner_latch_ms == 0U &&
+         l > 0.95f * TRACK_HEX_SPEED && r > 0.95f * TRACK_HEX_SPEED);
+
+  /* 右中方框内第 1 弯已确立右转方向 (yaw_seg>=45°) 后，即使没触发折角识别直接丢线也锁死右转原地旋转 */
+  setup(TRK_SQ_RM_LOOP); s_yaw_seg = 90.0f; s_last_dir = -1; mock_line = 0x000;
+  assert(step(0, 0, &l, &r) == 0U && s_search_active && s_search_dir == 1 && s_search_fwd_spd == 0.0f);
+}
+
 int main(void) {
   test_calibration_and_resilience();
   test_gap();
@@ -340,6 +398,7 @@ int main(void) {
   test_finish();
   test_search_never_stops();
   test_follow_line_cascade();
+  test_corner_latch_and_in_place_search();
   puts("track navigation host tests: OK");
   return 0;
 }

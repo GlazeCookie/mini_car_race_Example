@@ -65,10 +65,10 @@
 #define SPEED_FF_OFFSET    200.0f  /* 死区补偿 PWM */
 #define SPEED_FF_GAIN      0.010f  /* PWM / (计数每秒) */
 #define SPEED_MAX_PWM      7199.0f /* 满量程 PWM（对应 TIM1->ARR = 7199） */
-#define SPEED_KP           0.025f
-#define SPEED_KI           0.25f
+#define SPEED_KP           0.055f
+#define SPEED_KI           0.70f
 #define SPEED_KD           0.0f
-#define SPEED_INTEGRAL_LIMIT 2000.0f /* 积分项在 PWM 中的最大绝对贡献 */
+#define SPEED_INTEGRAL_LIMIT 2800.0f /* 积分项在 PWM 中的最大绝对贡献 */
 #define LEFT_ENCODER_SIGN  1
 #define RIGHT_ENCODER_SIGN (-1)
 /* USER CODE END PD */
