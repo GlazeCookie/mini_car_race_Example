@@ -9,6 +9,12 @@
 #define NAV_GYRO_SCALE           0.9807f
 #define NAV_GYRO_SENS            16.4f
 #define NAV_GYRO_CAL_MS          800U    /* 配合发车前 200 ms 消抖，总计停 1 s */
+#define NAV_GYRO_CAL_WIN_SAMPLES 25U     /* 标定分窗样本数（约 50 ms 一窗），用于剔除碰车震动窗 */
+#define NAV_GYRO_CAL_MAX_WINS    24U     /* 最多记录 24 个静止子窗口 */
+#define NAV_GYRO_CAL_STILL_SPAN  80      /* 单窗峰峰值阈值（<= 80 LSB ≈ 4.9 °/s 视为静止） */
+#define NAV_GYRO_CAL_OUTLIER_LSB 40.0f   /* 与静止窗口中位数偏差 <= 40 LSB ≈ 2.4 °/s 才纳入均值 */
+#define NAV_GYRO_HOLD_MAX_FAILS  2U      /* 陀螺仪偶发读失败最多保持 2 帧旧角速度 */
+#define NAV_GYRO_DROP_MAX_FAILS  25U     /* 连续读失败达到该帧数后降级为无陀螺仪模式 */
 #define NAV_LINE_ACTIVE          1U
 
 /* 全赛道模式巡线：三环串级 PID（位置外环 PD -> 目标偏航角速度 -> 陀螺仪角速度 PID -> 轮速环） */
@@ -23,8 +29,8 @@
 #define NAV_CORNER_MAX_RATE_DPS  572.0f   /* 90° 直角折角目标角速度上限 (°/s) */
 
 /* 陀螺仪角度外环 + 角速度内环 PID（全局复用于巡线与丢线弯道寻线） */
-#define NAV_RATE_FF_GAIN         44.0f    /* 前馈：约 44 counts/s 差速对应 1 °/s 转向 */
-#define NAV_RATE_KP              58.0f    /* 角速度环 P */
+#define NAV_RATE_FF_GAIN         53.0f    /* 前馈：约 44 counts/s 差速对应 1 °/s 转向 */
+#define NAV_RATE_KP              70.0f    /* 角速度环 P */
 #define NAV_RATE_KI              260.0f   /* 角速度环 I */
 #define NAV_RATE_I_LIMIT         18000.0f /* 定角寻线角速度积分限幅 */
 #define NAV_FOLLOW_RATE_I_LIMIT  9000.0f  /* 连续巡线角速度积分限幅 */
@@ -32,12 +38,13 @@
 
 /* 丢线弯道定角寻线（由陀螺仪转向 PID 控速并把单向转角死死卡在 ±135° 内，绝不 180° 掉头） */
 #define NAV_SEARCH_TARGET_DEG    135.0f   /* 覆盖 90° 与 120° 弯，低于 180° 防掉头 */
-#define NAV_SEARCH_MAX_RATE_DPS  594.0f   /* 寻线最大旋转角速度 (°/s) */
+#define NAV_SEARCH_MAX_RATE_DPS  540.0f   /* 普通丢线寻线最大旋转角速度 (°/s)，保持高响应 */
+#define NAV_CORNER_SEARCH_RATE_DPS 594.0f /* 90° 折角/方框原地纯旋转寻线角速度上限 (°/s) */
 #define NAV_SEARCH_MIN_RATE_DPS  121.0f   /* 接近边界时最小旋转角速度 (°/s) */
 #define NAV_SEARCH_FWD_SPEED     4500.0f  /* 普通丢线轻弧线前移速度 (counts/s, ≈0.12 m/s)；直角触发后原地 0 速旋转 */
 #define NAV_SEARCH_SWEEP_MS      1500U    /* 兜底超时：超时仍未找到则向对称边界回扫 */
-#define NAV_RECAPTURE_MS         70U      /* 重新抓到线后的稳姿窗口 */
-#define NAV_RECAPTURE_SPEED      31200.0f /* 抓线瞬间限速 (counts/s, ≈0.84 m/s) */
+#define NAV_RECAPTURE_MS         85U      /* 重新抓到线后的稳姿窗口 */
+#define NAV_RECAPTURE_SPEED      31200.0f /* 抓线瞬间限速 (counts/s, ≈0.84 m/s)，兼顾稳姿与连贯提速 */
 #define NAV_RECAPTURE_MAX_RATE   396.0f   /* 抓线窗口内目标角速度上限 (°/s) */
 #define NAV_YAW_HOLD_KP          260.0f   /* 锁航向直行纠偏增益 (counts/s per deg) */
 
@@ -48,20 +55,35 @@
 #define NAV_BROKEN_SWEEP_MM      820.0f   /* 超过后进一步扩大扫线角度 */
 #define NAV_BROKEN_ALIGN_MIN_MM  60.0f    /* 抓到对面线后最小巡线对齐距离 */
 #define NAV_BROKEN_ALIGN_MAX_MM  180.0f   /* 抓线后超过该距离直接切入下一段 */
-#define NAV_BROKEN_OFFSET_DEG    20.0f    /* 右->左过断路向右(北)偏转 20° */
-#define NAV_FINISH_ACTIVE_COUNT  9U       /* 终点双横线至少 9 路有效且横跨两侧边界 */
-#define NAV_FINISH_MAX_RATE_DPS  90.0f    /* 仅在直行姿态判定终点横线，过滤急弯与 90° 角 */
-#define NAV_FINISH_DEBOUNCE_MS   6U
+#define NAV_BROKEN_ALIGN_LOST_MS 150U     /* 对齐阶段连续丢线超时后退回扫线 */
+#define NAV_BROKEN_OFFSET_DEG    48.0f    /* 右->左过断路向右(北)偏转 34° */
+#define NAV_TARGET_LAPS              2U       /* 跑完 2 圈后在终点双横线停车 */
+#define NAV_LAP2_START_SEG_MM        300.0f   /* 第 1 圈终点第二条白线后进入第 2 圈，保留 600 mm 起步屏蔽 */
+#define NAV_FINISH_ACTIVE_COUNT      9U       /* 终点双横线至少 9 路有效且横跨两侧边界 */
+#define NAV_FINISH_MAX_RATE_DPS      90.0f    /* 仅在直行姿态判定终点横线，过滤急弯与 90° 角 */
+#define NAV_FINISH_DEBOUNCE_MS       6U
+#define NAV_FINISH_APPROACH_SPEED    (TRACK_BASE_SPEED * 0.70f) /* 停车圈过第一条终点横线后减速 30% */
+#define NAV_FINISH_LAP1_BYPASS_MM    550.0f   /* 第 1 圈若漏检第二条白线，越过发车区后自动切入第 2 圈 */
+#define NAV_FINISH_BRAKE_REV_SPEED   12000.0f /* 踩到第二条终点横线后主动反接制动目标 (counts/s) */
+#define NAV_FINISH_BRAKE_FAST_SPEED  2000.0f  /* 高于此轮速施加强反接制动，低于后切 0 闭环锁停 */
+#define NAV_FINISH_STOP_SPEED        1000.0f  /* 双轮均降到此轮速以下视为进入停稳速度带 */
+#define NAV_FINISH_STOP_HOLD_MS      8U       /* 双轮需连续保持停稳带 8 ms (4 帧) 才切断电机，防量化/打滑误松刹 */
+#define NAV_FINISH_BRAKE_MAX_MS      220U     /* 主动制动保护超时 */
 
 static TrackState s_state = TRK_START_CLEAR;
 static TrackState s_fault_state = TRK_START_CLEAR;
 static TrackFault s_fault = TRACK_FAULT_NONE;
+static uint8_t s_lap = 1U;
 static uint16_t s_last_line_mask = 0U;
 static uint8_t s_last_line_count = 0U;
 static uint16_t s_finish_active_ms = 0U;
 static uint16_t s_finish_clear_ms = 0U;
 static uint8_t s_finish_released = 0U;
+static uint8_t s_finish_brake_done = 0U;
+static uint16_t s_finish_brake_ms = 0U;
+static uint16_t s_finish_stop_ms = 0U;
 static uint8_t s_gyro_ok = 0U;
+static uint8_t s_gyro_fail_cnt = 0U;
 static float s_gyro_bias = 0.0f;
 static float s_last_raw_rate = 0.0f;
 static float s_yaw_deg = 0.0f;       /* 全局累计航向角（顺时针为正） */
@@ -70,6 +92,8 @@ static float s_rate_lpf = 0.0f;      /* 低通角速度（°/s，顺时针为正
 static float s_seg_mm = 0.0f;        /* 当前状态累计里程（mm） */
 static float s_yaw_ref = 0.0f;       /* 参考航向（锁直行/断路/转向用） */
 static float s_yaw_west = 0.0f;      /* 过断路及左上 T 型方框的西向基准航向 */
+static float s_yaw_hex300 = 0.0f;    /* 中左 300 双环岛入口 590/530 东向基准航向 */
+static uint8_t s_yaw_hex300_valid = 0U;
 
 static float s_prev_err = 0.0f;
 static float s_err_rate_lpf = 0.0f;
@@ -107,13 +131,16 @@ static void gyro_rate_pid_update(float target_rate_dps, float measured_rate_dps,
                                  float i_limit, float dt_s,
                                  float *out_l, float *out_r) {
   float ff = NAV_RATE_FF_GAIN * target_rate_dps;
+  float max_diff_fwd = TRACK_MAX_SPEED - fabsf(forward_spd);
+  float max_diff_rev = fabsf(forward_spd) + max_rev_spd;
+  float max_diff = (max_diff_fwd < max_diff_rev) ? max_diff_fwd : max_diff_rev;
   float diff;
+  if (max_diff < 0.0f) {
+    max_diff = 0.0f;
+  }
   if (s_gyro_ok) {
     float err;
     float cand_i;
-    float max_diff_fwd = TRACK_MAX_SPEED - fabsf(forward_spd);
-    float max_diff_rev = fabsf(forward_spd) + max_rev_spd;
-    float max_diff = (max_diff_fwd < max_diff_rev) ? max_diff_fwd : max_diff_rev;
 
     /* 出弯回直或 S 弯反打时快速泄放旧方向积分，避免惯性反拖出线 */
     if (fabsf(target_rate_dps) < 15.0f) {
@@ -137,6 +164,8 @@ static void gyro_rate_pid_update(float target_rate_dps, float measured_rate_dps,
   } else {
     diff = ff;
   }
+  /* 仅按内轮反转极限对称限幅（防原地旋前窜与急弯净前速反升），不因外轮近顶速截断高速入弯的内轮刹车 */
+  diff = clamp_f(diff, -max_diff_rev, max_diff_rev);
   *out_l = clamp_f(forward_spd + diff, -max_rev_spd, TRACK_MAX_SPEED);
   *out_r = clamp_f(forward_spd - diff, -max_rev_spd, TRACK_MAX_SPEED);
 }
@@ -152,11 +181,17 @@ static void enter_state(TrackState next) {
   s_corner_override_prev = 0U;
   s_search_fwd_spd = NAV_SEARCH_FWD_SPEED;
   gyro_rate_pid_reset();
+  if (next == TRK_START_CLEAR || next == TRK_APPROACH_HEX_MID) {
+    s_yaw_hex300_valid = 0U;
+  }
   if (next == TRK_FINISH_ARMED || next == TRK_FINISH_BAR1) {
     s_finish_active_ms = 0U;
     s_finish_clear_ms = 0U;
     s_finish_released = 0U;
   }
+  s_finish_brake_done = 0U;
+  s_finish_brake_ms = 0U;
+  s_finish_stop_ms = 0U;
 }
 
 void TrackNav_Abort(TrackFault fault) {
@@ -248,10 +283,6 @@ static uint8_t is_left_branch(const LineScanResult *scan) {
   return 0U;
 }
 
-static uint8_t is_branch_or_cross(const LineScanResult *scan) {
-  return (scan->cluster_count >= 2U || scan->active_count >= 5U || scan->max_width >= 4U) ? 1U : 0U;
-}
-
 /* 六边形 60° 交叉口判据：双簇分离或至少 6 路有效，避免单线弯道(如 0x03C/0x1E0)误判 */
 static uint8_t is_hex_junction(const LineScanResult *scan) {
   return (scan->cluster_count >= 2U || scan->active_count >= 6U) ? 1U : 0U;
@@ -265,6 +296,33 @@ static uint8_t is_finish_bar(const LineScanResult *scan) {
           scan->clusters[0].start_ch <= 1U &&
           scan->clusters[scan->cluster_count - 1U].end_ch >= 10U &&
           (!s_gyro_ok || fabsf(s_rate_lpf) <= NAV_FINISH_MAX_RATE_DPS)) ? 1U : 0U;
+}
+
+/* 踩到第二条终点横线后先靠速度环闭环反接刹死，待双轮连续稳在停稳带或超时再返回 1 关断电机 */
+static uint8_t finish_active_brake_step(float left_spd, float right_spd, float dt_s,
+                                        float *out_l, float *out_r) {
+  float dt_ms = dt_s * 1000.0f;
+  if (s_finish_brake_done) {
+    *out_l = 0.0f;
+    *out_r = 0.0f;
+    return 1U;
+  }
+  s_finish_brake_ms = accumulate_ms(s_finish_brake_ms, dt_ms, NAV_FINISH_BRAKE_MAX_MS);
+  if (fabsf(left_spd) <= NAV_FINISH_STOP_SPEED && fabsf(right_spd) <= NAV_FINISH_STOP_SPEED) {
+    s_finish_stop_ms = accumulate_ms(s_finish_stop_ms, dt_ms, NAV_FINISH_STOP_HOLD_MS);
+  } else {
+    s_finish_stop_ms = 0U;
+  }
+  if (s_finish_stop_ms >= NAV_FINISH_STOP_HOLD_MS ||
+      s_finish_brake_ms >= NAV_FINISH_BRAKE_MAX_MS) {
+    s_finish_brake_done = 1U;
+    *out_l = 0.0f;
+    *out_r = 0.0f;
+    return 1U;
+  }
+  *out_l = (left_spd > NAV_FINISH_BRAKE_FAST_SPEED) ? -NAV_FINISH_BRAKE_REV_SPEED : 0.0f;
+  *out_r = (right_spd > NAV_FINISH_BRAKE_FAST_SPEED) ? -NAV_FINISH_BRAKE_REV_SPEED : 0.0f;
+  return 0U;
 }
 
 /* 单侧 90° 直角折角前瞻检测：排除双向十字 (ch<=2..ch>=9) 与常规弯斜线 (width<=5)，仅识别单侧贴边宽横线 (width 6..9) */
@@ -293,8 +351,16 @@ static uint8_t allow_90deg_corner_snap(void) {
     case TRK_HEX_300_L:
     case TRK_HEX_300_EXIT:
       return 0U;
+    case TRK_SQ_RM_LOOP:
+    case TRK_LEFT_SQ2_LOOP:
+    case TRK_LEFT_SQ3_LOOP:
+      return (s_seg_mm >= 620.0f && s_gyro_ok && fabsf(s_yaw_seg) >= 210.0f) ? 0U : 1U;
+    case TRK_LEFT_SQ1_LOOP:
+      return (s_seg_mm >= 950.0f && s_gyro_ok && fabsf(s_yaw_seg) >= 210.0f) ? 0U : 1U;
     case TRK_APPROACH_OCT:
       return (s_seg_mm >= 220.0f) ? 1U : 0U;
+    case TRK_ZIGZAG_2:
+      return (s_seg_mm >= 200.0f) ? 1U : 0U;
     default:
       return 1U;
   }
@@ -365,8 +431,10 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
     }
 
     if (s_gyro_ok) {
+      float search_cap = (s_search_fwd_spd <= 1.0f) ? NAV_CORNER_SEARCH_RATE_DPS
+                                                    : NAV_SEARCH_MAX_RATE_DPS;
       rate_mag = clamp_f(NAV_TURN_ANGLE_KP * rem,
-                         NAV_SEARCH_MIN_RATE_DPS, NAV_SEARCH_MAX_RATE_DPS);
+                         NAV_SEARCH_MIN_RATE_DPS, search_cap);
       gyro_rate_pid_update(rate_mag * (float)s_search_dir, s_rate_lpf,
                            s_search_fwd_spd, TRACK_MAX_REV_SPEED,
                            NAV_RATE_I_LIMIT, dt_s, out_l, out_r);
@@ -458,30 +526,35 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
     s_err_rate_lpf = 0.0f;
   }
 
-  /* 明显偏离中心（>=2.0）立即更新方向；中心附近小偏差需连续 4 帧同向才更新，防止单灯闪烁误翻 */
-  if (err >= 2.0f) {
-    s_last_dir = 1;
-    s_small_dir_cand = 1;
-    s_small_dir_cnt = 0U;
-  } else if (err <= -2.0f) {
-    s_last_dir = -1;
-    s_small_dir_cand = -1;
-    s_small_dir_cnt = 0U;
-  } else if (err >= 0.8f || err <= -0.8f) {
-    int8_t d = (err > 0.0f) ? 1 : -1;
-    if (s_last_dir == 0) {
-      s_last_dir = d;
-    } else if (d == s_small_dir_cand) {
-      if (++s_small_dir_cnt >= 4U) {
+  /* 明显偏离中心（>=2.0）立即更新方向；抓线稳姿前期不因单帧微越过中心就立即反翻寻线方向，防止左右摆头 */
+  {
+    uint8_t settling_recapture = (s_recapture_ms > (NAV_RECAPTURE_MS / 2U)) ? 1U : 0U;
+    float pos_thresh = (settling_recapture && s_last_dir < 0) ? 6.0f : 2.0f;
+    float neg_thresh = (settling_recapture && s_last_dir > 0) ? 6.0f : 2.0f;
+    if (err >= pos_thresh) {
+      s_last_dir = 1;
+      s_small_dir_cand = 1;
+      s_small_dir_cnt = 0U;
+    } else if (err <= -neg_thresh) {
+      s_last_dir = -1;
+      s_small_dir_cand = -1;
+      s_small_dir_cnt = 0U;
+    } else if (err >= 0.8f || err <= -0.8f) {
+      int8_t d = (err > 0.0f) ? 1 : -1;
+      if (s_last_dir == 0) {
         s_last_dir = d;
-        s_small_dir_cnt = 4U;
+      } else if (d == s_small_dir_cand) {
+        if (++s_small_dir_cnt >= 4U) {
+          s_last_dir = d;
+          s_small_dir_cnt = 4U;
+        }
+      } else {
+        s_small_dir_cand = d;
+        s_small_dir_cnt = 1U;
       }
     } else {
-      s_small_dir_cand = d;
-      s_small_dir_cnt = 1U;
+      s_small_dir_cnt = 0U;
     }
-  } else {
-    s_small_dir_cnt = 0U;
   }
 
   raw_err_rate = (s_has_prev_err && dt_s > 1e-6f) ? ((err - s_prev_err) / dt_s) : 0.0f;
@@ -549,11 +622,18 @@ static void follow_yaw_hold(float target_yaw, float speed, float *out_l, float *
 }
 
 void TrackNav_Start(void) {
-  int32_t sum = 0;
-  uint32_t count = 0U;
+  int32_t all_sum = 0;
+  uint32_t all_count = 0U;
+  int32_t win_sum = 0;
+  uint16_t win_count = 0U;
+  int16_t win_min = 0;
+  int16_t win_max = 0;
+  float quiet_means[NAV_GYRO_CAL_MAX_WINS];
+  uint8_t quiet_cnt = 0U;
   uint32_t start_tick;
 
   s_state = TRK_START_CLEAR;
+  s_lap = 1U;
   s_yaw_deg = 0.0f;
   s_yaw_seg = 0.0f;
   s_rate_lpf = 0.0f;
@@ -561,6 +641,8 @@ void TrackNav_Start(void) {
   s_seg_mm = 0.0f;
   s_yaw_ref = 0.0f;
   s_yaw_west = 0.0f;
+  s_yaw_hex300 = 0.0f;
+  s_yaw_hex300_valid = 0U;
   s_prev_err = 0.0f;
   s_err_rate_lpf = 0.0f;
   s_has_prev_err = 0U;
@@ -582,6 +664,7 @@ void TrackNav_Start(void) {
   s_last_line_mask = 0U;
   s_last_line_count = 0U;
   s_gyro_bias = 0.0f;
+  s_gyro_fail_cnt = 0U;
 
   s_gyro_ok = (dodo_BMI270_init() == 0) ? 1U : 0U;
   start_tick = HAL_GetTick();
@@ -589,14 +672,67 @@ void TrackNav_Start(void) {
     if (s_gyro_ok) {
       int16_t gz = 0;
       if (dodo_BMI270_get_gyro_z(&gz) == 0) {
-        sum += (int32_t)gz;
-        ++count;
+        all_sum += (int32_t)gz;
+        ++all_count;
+        if (win_count == 0U) {
+          win_min = gz;
+          win_max = gz;
+        } else {
+          if (gz < win_min) win_min = gz;
+          if (gz > win_max) win_max = gz;
+        }
+        win_sum += (int32_t)gz;
+        ++win_count;
+        if (win_count >= NAV_GYRO_CAL_WIN_SAMPLES) {
+          if (((int32_t)win_max - (int32_t)win_min) <= NAV_GYRO_CAL_STILL_SPAN &&
+              quiet_cnt < NAV_GYRO_CAL_MAX_WINS) {
+            quiet_means[quiet_cnt++] = (float)win_sum / (float)win_count;
+          }
+          win_sum = 0;
+          win_count = 0U;
+        }
       }
     }
     HAL_Delay(2U);
   }
-  if (count > 0U) {
-    s_gyro_bias = (float)sum / (float)count;
+  if (win_count >= 10U &&
+      ((int32_t)win_max - (int32_t)win_min) <= NAV_GYRO_CAL_STILL_SPAN &&
+      quiet_cnt < NAV_GYRO_CAL_MAX_WINS) {
+    quiet_means[quiet_cnt++] = (float)win_sum / (float)win_count;
+  }
+  if (quiet_cnt >= 3U) {
+    float med;
+    float keep_sum = 0.0f;
+    uint8_t keep_cnt = 0U;
+    uint8_t i;
+    for (i = 1U; i < quiet_cnt; ++i) {
+      float key = quiet_means[i];
+      uint8_t j = i;
+      while (j > 0U && quiet_means[j - 1U] > key) {
+        quiet_means[j] = quiet_means[j - 1U];
+        --j;
+      }
+      quiet_means[j] = key;
+    }
+    med = ((quiet_cnt & 1U) != 0U)
+              ? quiet_means[quiet_cnt / 2U]
+              : 0.5f * (quiet_means[quiet_cnt / 2U - 1U] + quiet_means[quiet_cnt / 2U]);
+    for (i = 0U; i < quiet_cnt; ++i) {
+      if (fabsf(quiet_means[i] - med) <= NAV_GYRO_CAL_OUTLIER_LSB) {
+        keep_sum += quiet_means[i];
+        ++keep_cnt;
+      }
+    }
+    s_gyro_bias = (keep_cnt > 0U) ? (keep_sum / (float)keep_cnt) : med;
+  } else if (quiet_cnt > 0U) {
+    float q_sum = 0.0f;
+    uint8_t i;
+    for (i = 0U; i < quiet_cnt; ++i) {
+      q_sum += quiet_means[i];
+    }
+    s_gyro_bias = q_sum / (float)quiet_cnt;
+  } else if (all_count > 0U) {
+    s_gyro_bias = (float)all_sum / (float)all_count;
   }
   enter_state(TRK_START_CLEAR);
 }
@@ -604,14 +740,19 @@ void TrackNav_Start(void) {
 uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
                       float *out_l, float *out_r) {
   LineScanResult scan;
-  float raw_rate = s_last_raw_rate;
+  float raw_rate = 0.0f;
+  float left_spd = (dt_s > 1e-6f) ? ((float)left_delta / dt_s) : 0.0f;
+  float right_spd = (dt_s > 1e-6f) ? ((float)right_delta / dt_s) : 0.0f;
   float step_mm;
 
   *out_l = 0.0f;
   *out_r = 0.0f;
 
-  if (s_state == TRK_DONE || s_state == TRK_FAULT_STOP) {
+  if (s_state == TRK_FAULT_STOP) {
     return 1U;
+  }
+  if (s_state == TRK_DONE) {
+    return finish_active_brake_step(left_spd, right_spd, dt_s, out_l, out_r);
   }
 
   if (s_gyro_ok) {
@@ -619,6 +760,20 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
     if (dodo_BMI270_get_gyro_z(&gz) == 0) {
       raw_rate = -((float)gz - s_gyro_bias) / NAV_GYRO_SENS;
       s_last_raw_rate = raw_rate;
+      s_gyro_fail_cnt = 0U;
+    } else {
+      if (s_gyro_fail_cnt < 255U) {
+        ++s_gyro_fail_cnt;
+      }
+      if (s_gyro_fail_cnt <= NAV_GYRO_HOLD_MAX_FAILS) {
+        raw_rate = s_last_raw_rate;
+      } else {
+        raw_rate = 0.0f;
+        s_last_raw_rate = 0.0f;
+        if (s_gyro_fail_cnt >= NAV_GYRO_DROP_MAX_FAILS) {
+          s_gyro_ok = 0U;
+        }
+      }
     }
   } else {
     raw_rate = 0.0f;
@@ -665,7 +820,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     case TRK_SQ_RM_LOOP:
       follow_line_pid(&scan, 0, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 750.0f &&
+      if (debounce_cond((s_seg_mm >= 620.0f &&
                          (!s_gyro_ok || fabsf(s_yaw_seg) >= 210.0f) &&
                          is_crossroad(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
@@ -678,47 +833,70 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       if (s_seg_mm >= NAV_CROSS_PASS_MM) enter_state(TRK_APPROACH_HEX_R);
       break;
 
-    /* 4. 右中 200 六边形（跳过 320mm 处左侧回流线 860..7E0，在 420mm 右侧分叉 0F8/3B8 切入 -> 绕一圈 -> 左偏出到 330） */
-    case TRK_APPROACH_HEX_R:
-      follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 360.0f && is_branch_or_cross(&scan) &&
+    /* 4. 右中 200 六边形（跳过 320mm 处左侧回流线 860..7E0，在 420mm 右侧分叉 3F8/3B8 前预减速切入 -> 绕一圈 -> 左偏出到 330） */
+    case TRK_APPROACH_HEX_R: {
+      float spd = (s_seg_mm >= 220.0f) ? TRACK_HEX_SPEED : TRACK_BASE_SPEED;
+      follow_line_pid(&scan, 0, spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      if (debounce_cond((s_seg_mm >= 360.0f && is_hex_junction(&scan) &&
                          scan.clusters[scan.cluster_count - 1U].end_ch >= 8U) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
         enter_state(TRK_HEX_R_ENTER);
       }
       break;
+    }
 
     case TRK_HEX_R_ENTER:
       follow_line_pid(&scan, -1, TRACK_HEX_R_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (s_seg_mm >= 120.0f) enter_state(TRK_HEX_R_LOOP);
       break;
 
-    case TRK_HEX_R_LOOP:
+    case TRK_HEX_R_LOOP: {
+      float hex_total_yaw = s_yaw_deg - s_yaw_ref;
+      uint8_t exit_fork = (scan.cluster_count >= 2U &&
+                           s_seg_mm >= 820.0f &&
+                           (s_gyro_ok ? (s_yaw_seg <= -265.0f || hex_total_yaw <= -300.0f)
+                                      : (s_seg_mm >= 900.0f))) ||
+                          (scan.active_count >= 6U &&
+                           s_seg_mm >= 850.0f &&
+                           (s_gyro_ok ? (s_yaw_seg <= -275.0f)
+                                      : (s_seg_mm >= 920.0f)));
       follow_line_pid(&scan, 0, TRACK_HEX_R_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 850.0f && s_yaw_seg <= -275.0f &&
-                         (scan.cluster_count >= 2U || scan.active_count >= 6U)) ? 1U : 0U, 2U)) {
+      if (debounce_cond(exit_fork ? 1U : 0U, 2U)) {
+        uint8_t late_trigger = (s_gyro_ok && s_yaw_seg <= -315.0f) ? 1U : 0U;
         enter_state(TRK_HEX_R_EXIT);
+        /* 仅当环内已转过 -315°（明显晚于 320mm 回流口、接近 420mm 再入环口）才跳过前段左咬 */
+        if (late_trigger) {
+          s_seg_mm = 70.0f;
+        }
       } else if (s_yaw_seg <= -345.0f || s_seg_mm >= 1220.0f) {
-        /* 兜底：若已自然转完出环切上 330 直道，直接进入 APPROACH_OCT，防止 HEX_R_EXIT 在下个直角弯错触发 */
-        enter_state(TRK_APPROACH_OCT);
+        if (scan.cluster_count <= 1U && s_seg_mm >= 980.0f) {
+          /* 兜底：已单线且走足 980mm 确在 330 直道上，直接进 APPROACH_OCT，防止下个直角弯错触发 */
+          enter_state(TRK_APPROACH_OCT);
+        } else {
+          /* 若仍在 420mm 双簇分叉或未满 980mm，切进 HEX_R_EXIT 右咬保护段防重进第二圈 */
+          enter_state(TRK_HEX_R_EXIT);
+          s_seg_mm = 70.0f;
+        }
       }
       break;
+    }
 
     case TRK_HEX_R_EXIT: {
       int8_t exit_pick = 0;
+      float hex_total_yaw = s_yaw_deg - s_yaw_ref;
       if (s_seg_mm < 65.0f) {
-        /* 离开 320mm 回流口：左咬切上 420/330 主干道 */
+        /* 离开 320mm 回流口：完整左咬切上 420/330 主干道 */
         exit_pick = -1;
       } else if (scan.cluster_count >= 2U ||
                  (scan.cluster_count == 1U && scan.clusters[0].width >= 4U &&
-                  (!s_gyro_ok || s_yaw_deg <= s_yaw_ref - 340.0f))) {
-        /* 65~200mm 再次经过 420mm 入环分叉 (如 0xF0C/0x3B8) 时，改取最右簇直走 330，防止再次左拐入环 */
+                  (!s_gyro_ok || hex_total_yaw <= -338.0f))) {
+        /* 65~200mm 再次经过 420mm 入环分叉 (如 0xF0C/0x3B8) 时，改取最右簇/右沿直走 330，防止再次左拐入环 */
         exit_pick = 1;
       }
       follow_line_pid(&scan, exit_pick, TRACK_HEX_R_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (s_seg_mm >= 195.0f &&
           (scan.cluster_count <= 1U || s_seg_mm >= 240.0f) &&
-          (!s_gyro_ok || s_yaw_deg <= s_yaw_ref - 335.0f || s_seg_mm >= 240.0f)) {
+          (!s_gyro_ok || hex_total_yaw <= -335.0f || s_seg_mm >= 240.0f)) {
         enter_state(TRK_APPROACH_OCT);
       }
       break;
@@ -764,8 +942,9 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
           enter_state(TRK_BROKEN_CLEAR);
         }
       } else {
+        float approach_spd = (s_seg_mm < 720.0f) ? TRACK_HEX_SPEED : TRACK_BROKEN_SPEED;
         s_broken_miss_cnt = 0U;
-        follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+        follow_line_pid(&scan, 0, approach_spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       }
       break;
 
@@ -797,8 +976,13 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
           ((s_seg_mm >= NAV_BROKEN_ALIGN_MIN_MM && fabsf(s_yaw_deg - s_yaw_west) <= 25.0f) ||
            s_seg_mm >= NAV_BROKEN_ALIGN_MAX_MM)) {
         enter_state(TRK_TL_SQ_PRE_T1);
-      } else if (s_search_active && s_lost_ms >= 150U) {
+      } else if (s_search_active && s_lost_ms >= NAV_BROKEN_ALIGN_LOST_MS) {
         enter_state(TRK_BROKEN_SEEK);
+        s_seg_mm = NAV_BROKEN_SEEK_MM + 1.0f; /* 直接进入 -20°/+32° 左右回扫并立即允许重新抓线，避免清零重跑 580 mm */
+        s_search_active = 0U;
+        s_search_dir = 0;
+        s_search_phase = 0U;
+        s_lost_ms = 0U;
       }
       break;
 
@@ -910,8 +1094,8 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       if (s_seg_mm >= NAV_CROSS_PASS_MM) enter_state(TRK_LEFT_SQ2_LOOP);
       break;
     case TRK_LEFT_SQ2_LOOP:
-      follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 650.0f &&
+      follow_line_pid(&scan, 0, TRACK_SQ_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      if (debounce_cond((s_seg_mm >= 620.0f &&
                          (!s_gyro_ok || fabsf(s_yaw_seg) >= 210.0f) &&
                          is_crossroad(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
@@ -935,8 +1119,8 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       if (s_seg_mm >= NAV_CROSS_PASS_MM) enter_state(TRK_LEFT_SQ3_LOOP);
       break;
     case TRK_LEFT_SQ3_LOOP:
-      follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 650.0f &&
+      follow_line_pid(&scan, 0, TRACK_SQ_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      if (debounce_cond((s_seg_mm >= 620.0f &&
                          (!s_gyro_ok || fabsf(s_yaw_seg) >= 210.0f) &&
                          is_crossroad(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
@@ -965,7 +1149,8 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     case TRK_HEX_BL_LOOP:
       follow_line_pid(&scan, 0, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 1020.0f && (!s_gyro_ok || s_yaw_seg >= 270.0f) &&
+      if (debounce_cond(((s_gyro_ok ? (s_seg_mm >= 900.0f && s_yaw_seg >= 270.0f)
+                                    : (s_seg_mm >= 960.0f)) &&
                          is_hex_junction(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
         enter_state(TRK_HEX_BL_EXIT);
@@ -980,7 +1165,16 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
     /* 10. 中左 300+200 双六边形 8 字一笔画 */
     case TRK_APPROACH_HEX_MID:
       follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      if (scan.cluster_count == 1U && s_seg_mm >= 720.0f && fabsf(s_prev_err) <= 2.5f) {
+        /* 沿 590 东向直道刷新双环岛基准航向，供出环辨别 530 主干道与 300 重入环边 */
+        s_yaw_hex300 = s_yaw_deg;
+        s_yaw_hex300_valid = 1U;
+      }
       if (debounce_cond((s_seg_mm >= 700.0f && is_hex_junction(&scan)) ? 1U : 0U, 2U)) {
+        if (!s_yaw_hex300_valid) {
+          s_yaw_hex300 = s_yaw_deg;
+          s_yaw_hex300_valid = 1U;
+        }
         enter_state(TRK_HEX_300_ENTER);
       }
       break;
@@ -1006,7 +1200,8 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     case TRK_HEX_200_LOOP:
       follow_line_pid(&scan, 0, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 1000.0f && (!s_gyro_ok || s_yaw_seg >= 270.0f) &&
+      if (debounce_cond(((s_gyro_ok ? (s_seg_mm >= 900.0f && s_yaw_seg >= 270.0f)
+                                    : (s_seg_mm >= 960.0f)) &&
                          is_hex_junction(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
         enter_state(TRK_HEX_200_CROSS);
@@ -1018,18 +1213,64 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       if (s_seg_mm >= 85.0f) enter_state(TRK_HEX_300_L);
       break;
 
-    case TRK_HEX_300_L:
+    case TRK_HEX_300_L: {
+      float rel_yaw = s_yaw_hex300_valid ? (s_yaw_deg - s_yaw_hex300) : (s_yaw_seg + 210.0f);
+      uint8_t exit_fork = (s_gyro_ok
+          ? (s_seg_mm >= 1020.0f && s_yaw_seg <= -145.0f && rel_yaw <= 55.0f)
+          : (s_seg_mm >= 1100.0f)) &&
+          is_hex_junction(&scan);
       follow_line_pid(&scan, 0, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 720.0f && (!s_gyro_ok || s_yaw_seg <= -90.0f) &&
-                         is_hex_junction(&scan)) ? 1U : 0U, 2U)) {
+      if (debounce_cond(exit_fork ? 1U : 0U, 2U)) {
+        uint8_t late_trigger = (s_gyro_ok && rel_yaw <= 12.0f) ? 1U : 0U;
+        if (!s_yaw_hex300_valid) {
+          s_yaw_hex300 = (s_yaw_deg - s_yaw_seg) - 210.0f;
+          s_yaw_hex300_valid = 1U;
+        }
         enter_state(TRK_HEX_300_EXIT);
+        /* 若已转过 +12° 逼近/越过底顶点分叉，跳过前段左咬直接进入右咬保护，防再次左切重入 300 环 */
+        if (late_trigger) {
+          s_seg_mm = 70.0f;
+        }
+      } else if ((s_gyro_ok && s_seg_mm >= 1120.0f && rel_yaw <= 10.0f) ||
+                 s_seg_mm >= 1450.0f) {
+        if (!s_yaw_hex300_valid) {
+          s_yaw_hex300 = (s_yaw_deg - s_yaw_seg) - 210.0f;
+          s_yaw_hex300_valid = 1U;
+        }
+        if (scan.cluster_count <= 1U && s_seg_mm >= 1380.0f &&
+            (!s_gyro_ok || fabsf(rel_yaw) <= 12.0f)) {
+          /* 兜底：已单线走足 1380 mm 且回正到 530 东向，直接进 ZIGZAG_2 */
+          enter_state(TRK_ZIGZAG_2);
+        } else {
+          /* 兜底：已偏转接近 530/SE 分叉，直接切入右咬保护段防重入第二圈 */
+          enter_state(TRK_HEX_300_EXIT);
+          s_seg_mm = 70.0f;
+        }
       }
       break;
+    }
 
-    case TRK_HEX_300_EXIT:
-      follow_line_pid(&scan, -1, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (s_seg_mm >= 140.0f) enter_state(TRK_ZIGZAG_2);
+    case TRK_HEX_300_EXIT: {
+      int8_t exit_pick = 0;
+      float rel_yaw = s_yaw_hex300_valid ? (s_yaw_deg - s_yaw_hex300) : 0.0f;
+      if (s_seg_mm < 65.0f) {
+        /* 离开 590 右侧回流口 (1C3)：前 65 mm 保持左咬稳贴 300 西南边进切点 */
+        exit_pick = -1;
+      } else if ((scan.cluster_count >= 2U &&
+                  (!s_gyro_ok || !s_yaw_hex300_valid || rel_yaw <= 22.0f || s_seg_mm >= 95.0f)) ||
+                 (scan.cluster_count == 1U && scan.clusters[0].width >= 4U &&
+                  (!s_gyro_ok || !s_yaw_hex300_valid || rel_yaw <= 18.0f))) {
+        /* 越过底顶点后遇到 300 东南重入边 (左侧) 与 530 出环线 (右侧) 分叉时，改取最右簇/右沿直出 530 */
+        exit_pick = 1;
+      }
+      follow_line_pid(&scan, exit_pick, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      if (s_seg_mm >= 200.0f &&
+          (scan.cluster_count <= 1U || s_seg_mm >= 260.0f) &&
+          (!s_gyro_ok || !s_yaw_hex300_valid || fabsf(rel_yaw) <= 18.0f || s_seg_mm >= 260.0f)) {
+        enter_state(TRK_ZIGZAG_2);
+      }
       break;
+    }
 
     /* 11. 收尾：530+550+240 + 3峰锯齿 + 490 回发车区双横线停车 */
     case TRK_ZIGZAG_2: {
@@ -1050,22 +1291,41 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       if (s_finish_active_ms >= NAV_FINISH_DEBOUNCE_MS) enter_state(TRK_FINISH_BAR1);
       break;
 
-    case TRK_FINISH_BAR1:
-      follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+    case TRK_FINISH_BAR1: {
+      float approach_spd = (s_lap >= NAV_TARGET_LAPS) ? NAV_FINISH_APPROACH_SPEED : TRACK_BASE_SPEED;
+      follow_line_pid(&scan, 0, approach_spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (!s_finish_released) {
         if (!is_finish_bar(&scan))
           s_finish_clear_ms = accumulate_ms(s_finish_clear_ms, dt_s * 1000.0f, NAV_FINISH_DEBOUNCE_MS);
         else s_finish_clear_ms = 0U;
         if (s_finish_clear_ms >= NAV_FINISH_DEBOUNCE_MS) s_finish_released = 1U;
-      } else if (s_seg_mm >= 320.0f && is_finish_bar(&scan)) {
-        s_finish_active_ms = accumulate_ms(s_finish_active_ms, dt_s * 1000.0f, NAV_FINISH_DEBOUNCE_MS);
-        if (s_finish_active_ms >= NAV_FINISH_DEBOUNCE_MS) enter_state(TRK_DONE);
       } else {
-        s_finish_active_ms = 0U;
+        uint8_t hit_bar2 = 0U;
+        if (s_seg_mm >= 320.0f && is_finish_bar(&scan)) {
+          s_finish_active_ms = accumulate_ms(s_finish_active_ms, dt_s * 1000.0f, NAV_FINISH_DEBOUNCE_MS);
+          if (s_finish_active_ms >= NAV_FINISH_DEBOUNCE_MS) {
+            hit_bar2 = 1U;
+          }
+        } else {
+          s_finish_active_ms = 0U;
+        }
+        if (hit_bar2 || (s_lap < NAV_TARGET_LAPS && s_seg_mm >= NAV_FINISH_LAP1_BYPASS_MM)) {
+          if (s_lap < NAV_TARGET_LAPS) {
+            float lap2_seg = hit_bar2 ? NAV_LAP2_START_SEG_MM
+                                      : (NAV_LAP2_START_SEG_MM + 170.0f);
+            ++s_lap;
+            enter_state(TRK_START_CLEAR);
+            s_seg_mm = lap2_seg;
+          } else {
+            enter_state(TRK_DONE);
+          }
+        }
       }
       break;
+    }
 
     case TRK_DONE:
+      break;
     case TRK_FAULT_STOP:
     default:
       *out_l = 0.0f;
@@ -1073,7 +1333,10 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       return 1U;
   }
 
-  if (s_state == TRK_DONE || s_state == TRK_FAULT_STOP) {
+  if (s_state == TRK_DONE) {
+    return finish_active_brake_step(left_spd, right_spd, dt_s, out_l, out_r);
+  }
+  if (s_state == TRK_FAULT_STOP) {
     *out_l = 0.0f;
     *out_r = 0.0f;
     return 1U;

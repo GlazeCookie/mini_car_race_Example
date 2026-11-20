@@ -37,7 +37,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 5 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹 */
+#define ENCODER_TEST_MODE 4 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹 */
 #define ENCODER_TEST_PERIOD_MS 200U
 #define LINE_TELEMETRY_PERIOD_MS 100U
 #if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 6
@@ -605,7 +605,7 @@ static void Line_FollowStep(float dt) {
 #endif
 }
 
-/* 发车键低电平按下；导航模式下等待 200 ms 消抖后交由 TrackNav_Start 完成剩余 800 ms 标定，总计停 1 秒。 */
+/* 发车键低电平按下并等待松手消抖；导航模式下松手后等待 200 ms 稳定再交由 TrackNav_Start 完成剩余 800 ms 标定，松手后总计停 1 秒。 */
 static void WaitForRunKey(void) {
   for (;;) {
     /* 上电就开始发遥测：不按发车键也能架空轮子做静态验证（此时电机不动） */
@@ -622,6 +622,24 @@ static void WaitForRunKey(void) {
     if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET) {
       HAL_Delay(RUN_KEY_DEBOUNCE_MS);
       if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET) {
+        uint32_t release_ms = 0U;
+        while (release_ms < RUN_KEY_DEBOUNCE_MS) {
+#if ENCODER_TEST_MODE != 6
+          TelemetryStream_Poll();
+#endif
+#if PID_HELPER_ENABLE && PID_HELPER_IN_MODE
+          PidHelper_Poll();
+          if (PidHelper_IsTuning()) {
+            return;
+          }
+#endif
+          if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_SET) {
+            ++release_ms;
+          } else {
+            release_ms = 0U;
+          }
+          HAL_Delay(1U);
+        }
         break;
       }
     }
