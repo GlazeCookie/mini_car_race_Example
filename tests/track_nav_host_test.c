@@ -557,10 +557,10 @@ static void test_follow_line_cascade(void) {
   assert((l_fast - r_fast) < (l0 - r0));
   assert((l_fast - r_fast) < 2.0f * NAV_RATE_FF_GAIN * NAV_FOLLOW_MAX_RATE_DPS);
 
-  /* 出弯刚刚压回中心线 (err = 0) 而车身仍在顺时针快转时，内环主动反打制动并压低前进基速 */
+  /* 出弯刚刚压回中心线 (err = 0) 而车身仍在顺时针快转时，内环主动反打制动并压低前进基速，同时禁止外轮反接倒转消除顿挫 */
   mock_line = 0x060; /* ch 5,6 -> 0.0 */
   assert(step(0, 0, &l_exit, &r_exit) == 0U);
-  assert(r_exit > l_exit);
+  assert(r_exit > l_exit && l_exit >= 0.0f);
   assert(0.5f * (l_exit + r_exit) < TRACK_BASE_SPEED);
 
   /* 锯齿段目标角速度上限 (290 °/s) 比普通弯道 (320 °/s) 更收敛 */
@@ -608,6 +608,26 @@ static void test_corner_latch_and_in_place_search(void) {
   assert(step(0, 0, &l, &r) == 0U && s_search_active && s_search_dir == 1 && s_search_fwd_spd == 0.0f);
   assert(fabsf(0.5f * (l + r)) < 1e-3f && fabsf(l - TRACK_MAX_REV_SPEED) < 1e-3f &&
          fabsf(r + TRACK_MAX_REV_SPEED) < 1e-3f);
+
+  /* 原地旋过 65° 后自动带前速斜切抓线，120° 边界前持续前向切线，超界则反向回扫 */
+  s_yaw_deg = 78.0f;
+  assert(step(0, 0, &l, &r) == 0U && s_search_dir == 1 && 0.5f * (l + r) > 10000.0f);
+  s_yaw_deg = 95.0f;
+  assert(step(0, 0, &l, &r) == 0U && s_search_dir == 1 && 0.5f * (l + r) > 14000.0f);
+  s_yaw_deg = 117.0f;
+  assert(step(0, 0, &l, &r) == 0U && s_search_dir == -1 && s_search_phase == 1U);
+
+  /* 锯齿出口经短直道折弯段保持降速限幅，不提前拉到 TRACK_BASE_SPEED */
+  setup(TRK_ZIGZAG_1); s_seg_mm = 1600.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_ZIGZAG_SPEED) < 1e-3f);
+  setup(TRK_ZIGZAG_1); s_seg_mm = 1800.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_SQ_SPEED) < 1e-3f);
+  setup(TRK_ZIGZAG_1); s_seg_mm = 2600.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_BASE_SPEED) < 1e-3f);
+
+  /* 重抓边缘灯珠 (err=+7.0) 时保留较强内轮反甩制动，不被 6000 限死 */
+  setup(TRK_ZIGZAG_1); s_seg_mm = 1800.0f; s_recapture_ms = NAV_RECAPTURE_MS; mock_line = 0x004;
+  assert(step(0, 0, &l, &r) == 0U && r < -8000.0f);
 
   /* 只要后续踩回常规多灯直道 0x060（不必死等 48°），立即释放折角锁存并恢复满速巡线 */
   setup(TRK_SQ_RM_LOOP); mock_line = 0x07F;

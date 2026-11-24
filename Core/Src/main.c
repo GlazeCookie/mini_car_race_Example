@@ -36,16 +36,19 @@
 /* USER CODE END PTD */
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 4 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹 */
+#define IF_start_Brushless_motor 1 //是否启动无刷电机，1为启动，0为不启动
+#define ENCODER_TEST_MODE 4 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹；7: 仅负压电机转动 */
 #define ENCODER_TEST_PERIOD_MS 200U
 #define LINE_TELEMETRY_PERIOD_MS 100U
-#if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 6
-#error "ENCODER_TEST_MODE must be 0 through 6"
+#if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 7
+#error "ENCODER_TEST_MODE must be 0 through 7"
 #endif
 #define NAVIGATION_MODE (ENCODER_TEST_MODE >= 3 && ENCODER_TEST_MODE <= 5)
-#define PID_HELPER_IN_MODE (ENCODER_TEST_MODE != 4 && ENCODER_TEST_MODE != 5 && ENCODER_TEST_MODE != 6)
+#define PID_HELPER_IN_MODE (ENCODER_TEST_MODE != 4 && ENCODER_TEST_MODE != 5 && ENCODER_TEST_MODE != 6 && ENCODER_TEST_MODE != 7)
 #define BASIC_LINE_MODE (ENCODER_TEST_MODE == 0 || ENCODER_TEST_MODE == 2 || ENCODER_TEST_MODE == 6)
+#define BRUSHLESS_ONLY_MODE (ENCODER_TEST_MODE == 7)
+#define BRUSHLESS_MOTOR_ENABLED (IF_start_Brushless_motor || BRUSHLESS_ONLY_MODE)
+#define MOTION_CONTROL_MODE (ENCODER_TEST_MODE != 1 && !BRUSHLESS_ONLY_MODE)
 #define RUN_KEY_DEBOUNCE_MS 20U
 #define RUN_START_DELAY_MS  1000U /* 按发车键后等待 1 秒发车 */
 #define RUN_KEY_SETTLE_MS   200U  /* 导航模式按键松手稳定延时（与 800 ms 陀螺仪标定合计 1 s） */
@@ -89,10 +92,12 @@ UART_HandleTypeDef huart3;
 /* USER CODE BEGIN PV */
 //负压启动相关宏
 //负压启动流程：900us脉宽50Hzpwm信号输出2秒后，改为持续2000us脉宽50Hzpwm信号输出
-#define ESC_PULSE_SLOTS       200U       /* 20 ms at the 10 kHz TIM1 update rate */
-#define ESC_START_PULSE_SLOTS 9U         /* 0.9 ms */
-#define ESC_RUN_PULSE_SLOTS   20U        /* 2.0 ms */
-#define ESC_START_PERIODS     100U       /* 100 x 20 ms = 2 s */
+#define ESC_PULSE_SLOTS            200U /* 20 ms at the 10 kHz TIM1 update rate */
+#define ESC_START_PULSE_SLOTS      9U   /* 0.9 ms */
+#define ESC_IDLE_PULSE_SLOTS       10U  /* 1.0 ms (idle/stop) */
+#define ESC_RUN_PULSE_SLOTS        20U  /* 2.0 ms */
+#define ESC_START_PERIODS          100U /* 100 x 20 ms = 2 s */
+#define BRUSHLESS_ONLY_PULSE_SLOTS ESC_RUN_PULSE_SLOTS /* 模式 7 目标脉宽槽数 (10=停转 ~ 20=满油门) */
 
 static uint32_t esc_dma_table[ESC_PULSE_SLOTS];
 static uint32_t esc_high_slots;    /* high time currently stored in the table */
@@ -136,6 +141,24 @@ static void ESC_fullPulseWidth(void){
   }
   esc_high_slots = ESC_PULSE_SLOTS;
 }
+
+#if BRUSHLESS_ONLY_MODE
+/* 在 20 ms 帧低电平安全尾段切换脉宽，防止半帧毛刺干扰电调。 */
+static void Brushless_SetThrottle(uint32_t high_slots) {
+  uint32_t start_tick = HAL_GetTick();
+  uint32_t rem;
+
+  if (high_slots > ESC_PULSE_SLOTS) {
+    high_slots = ESC_PULSE_SLOTS;
+  }
+  do {
+    rem = __HAL_DMA_GET_COUNTER(&hdma_tim1_up);
+  } while ((rem > (ESC_PULSE_SLOTS - 25U) || rem < 3U) &&
+           (uint32_t)(HAL_GetTick() - start_tick) < 30U);
+  ESC_SetPulseWidth(high_slots);
+}
+#endif
+
 /* One interrupt per 20 ms frame: DMA transfer complete in circular mode.
    The 50 Hz waveform itself is produced by TIM1 + DMA in hardware; this
    handler only counts frames and switches 0.9 ms -> 2.0 ms after 2 s. */
@@ -144,11 +167,14 @@ static void ESC_DmaTransferComplete(DMA_HandleTypeDef *hdma) {
     ++esc_period_count;
     if (esc_period_count == ESC_START_PERIODS) {
       /* The frame that has just been completed was the last 0.9 ms frame:
-         100 x 20 ms = 2 s have elapsed, 2.0 ms is now held forever. */
-      if (!IF_start_Brushless_motor)
-        ESC_SetPulseWidth(10U);
-      else
-        ESC_SetPulseWidth(ESC_RUN_PULSE_SLOTS);
+         100 x 20 ms = 2 s have elapsed, target pulse width is now held. */
+#if BRUSHLESS_ONLY_MODE
+      ESC_SetPulseWidth(BRUSHLESS_ONLY_PULSE_SLOTS);
+#elif IF_start_Brushless_motor
+      ESC_SetPulseWidth(ESC_RUN_PULSE_SLOTS);
+#else
+      ESC_SetPulseWidth(ESC_IDLE_PULSE_SLOTS);
+#endif
       /* Nothing left to time, so stop the 50 Hz interrupt. */
       __HAL_DMA_DISABLE_IT(hdma, DMA_IT_TC);
     }
@@ -180,6 +206,14 @@ int fputc(int ch, FILE *f) {
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
+static uint16_t previous_left_count;
+static uint16_t previous_right_count;
+static int8_t left_motor_dir = 1;
+static int8_t right_motor_dir = 1;
+static uint16_t left_last_pwm = 0U;
+static uint16_t right_last_pwm = 0U;
+
+#if MOTION_CONTROL_MODE
 typedef struct {
   float integral;
   float previous_error;
@@ -188,12 +222,6 @@ typedef struct {
 
 static SpeedPid left_speed_pid;
 static SpeedPid right_speed_pid;
-static uint16_t previous_left_count;
-static uint16_t previous_right_count;
-static int8_t left_motor_dir = 1;
-static int8_t right_motor_dir = 1;
-static uint16_t left_last_pwm = 0U;
-static uint16_t right_last_pwm = 0U;
 
 static uint16_t Motor_UpdateAxis(int32_t signed_pwm, GPIO_TypeDef *dir_port, uint16_t dir_pin,
                                  int8_t *cur_dir, uint16_t *last_pwm) {
@@ -229,6 +257,7 @@ static void Motor_SetOutput(int32_t left_pwm, int32_t right_pwm) {
   TIM1->CCR2 = Motor_UpdateAxis(right_pwm, R_DIR_GPIO_Port, R_DIR_Pin,
                                 &right_motor_dir, &right_last_pwm);
 }
+#endif /* MOTION_CONTROL_MODE */
 
 static void Motor_StopAll(void) {
   TIM1->CCR1 = 0U;
@@ -380,19 +409,24 @@ static void Line_SendTelemetry(void) {
 #endif /* !PID_HELPER_ENABLE && !TELEMETRY_STREAM_ENABLE */
 #endif
 
+#if MOTION_CONTROL_MODE
 static float ClampFloat(float value, float minimum, float maximum) {
   if (value < minimum) return minimum;
   if (value > maximum) return maximum;
   return value;
 }
+#endif
 
 /* 16 位自由运行计数器的差值，允许单次采样间跨过一次回绕。 */
+#if !BRUSHLESS_ONLY_MODE
 static int32_t Encoder_Delta(uint16_t current, uint16_t previous) {
   int32_t delta = (uint16_t)(current - previous);
   if (delta > 32767) delta -= 65536;
   return delta;
 }
+#endif
 
+#if MOTION_CONTROL_MODE
 static void SpeedPid_Reset(SpeedPid *pid) {
   pid->integral = 0.0f;
   pid->previous_error = 0.0f;
@@ -406,6 +440,10 @@ static int32_t SpeedPid_Update(SpeedPid *pid, float target, float actual, float 
     pid->previous_error = 0.0f;
     pid->has_previous_error = 0U;
     return 0;
+  }
+  if ((target > 2000.0f && pid->integral < 0.0f) ||
+      (target < -2000.0f && pid->integral > 0.0f)) {
+    pid->integral *= 0.25f;
   }
   float error = target - actual;
   float derivative = pid->has_previous_error ? (error - pid->previous_error) / dt : 0.0f;
@@ -654,6 +692,7 @@ static void WaitForRunKey(void) {
   HAL_Delay(RUN_START_DELAY_MS);
 #endif
 }
+#endif /* MOTION_CONTROL_MODE */
 /* USER CODE END 0 */
 void Init_brushless_motor(void) {
   /* PA11 idles low: the first high level then also lasts exactly 0.9 ms,
@@ -666,7 +705,7 @@ void Init_brushless_motor(void) {
     Error_Handler();
   __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
   __HAL_TIM_ENABLE_DMA(&htim1, TIM_DMA_UPDATE);
-  if (IF_start_Brushless_motor)
+  if (BRUSHLESS_MOTOR_ENABLED)
     while (esc_period_count < ESC_START_PERIODS)
       HAL_Delay(200);//等待无刷电桥负压启动完成
   /* Disabled fan: return immediately; DMA completes the existing
@@ -678,12 +717,14 @@ void Init_brushless_motor(void) {
  */
 int main(void) {
   /* USER CODE BEGIN 1 */
-#if ENCODER_TEST_MODE != 1
+#if MOTION_CONTROL_MODE
   uint32_t last_control_cyc;
   uint32_t period_cyc;
 #if ENCODER_TEST_MODE == 2
   uint32_t last_telemetry_tick;
 #endif
+#elif BRUSHLESS_ONLY_MODE
+  uint8_t brushless_running = 1U;
 #endif
   /* USER CODE END 1 */
   /* MCU Configuration--------------------------------------------------------*/
@@ -712,6 +753,7 @@ int main(void) {
       HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL) != HAL_OK)
     Error_Handler();
 #if ENCODER_TEST_MODE != 1
+  Motor_StopAll();
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   Init_brushless_motor(); //等待无刷电调负压启动完成
@@ -723,16 +765,16 @@ int main(void) {
   TelemetryStream_Init(&huart3, LEFT_ENCODER_SIGN, RIGHT_ENCODER_SIGN);
 #endif
   /* PID Helper 调参协议挂在 USART3（PB10/PB11）；默认增益取编译期参数。 */
-#if ENCODER_TEST_MODE == 4 || ENCODER_TEST_MODE == 5 || ENCODER_TEST_MODE == 6
+#if ENCODER_TEST_MODE == 4 || ENCODER_TEST_MODE == 5 || ENCODER_TEST_MODE == 6 || BRUSHLESS_ONLY_MODE
   /* 保留速度 PID 的默认增益，不启用 PID Helper 串口收发。 */
   PidHelper_Init(NULL, SPEED_KP, SPEED_KI, SPEED_KD, TRACK_MAX_SPEED, SPEED_MAX_PWM);
 #else
   PidHelper_Init(&huart3, SPEED_KP, SPEED_KI, SPEED_KD, TRACK_MAX_SPEED, SPEED_MAX_PWM);
 #endif
-#if ENCODER_TEST_MODE != 1 || TELEMETRY_STREAM_ENABLE
+#if MOTION_CONTROL_MODE || TELEMETRY_STREAM_ENABLE
   dodo_BMI270_init(); // 初始化陀螺仪
 #endif
-#if ENCODER_TEST_MODE != 1
+#if MOTION_CONTROL_MODE
   WaitForRunKey();
 #endif
 #if NAVIGATION_MODE
@@ -740,7 +782,7 @@ int main(void) {
 #endif
   previous_left_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
   previous_right_count = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
-#if ENCODER_TEST_MODE != 1
+#if MOTION_CONTROL_MODE
   last_control_cyc = DWT->CYCCNT;
   period_cyc = LINE_PERIOD_US * (SystemCoreClock / 1000000U);
 #if ENCODER_TEST_MODE == 2
@@ -778,6 +820,25 @@ int main(void) {
     if (length > 0 && (unsigned int)length < sizeof(message))
       HAL_UART_Transmit(&huart3, (uint8_t *)message, (uint16_t)length, 100U);
 #endif
+#elif BRUSHLESS_ONLY_MODE
+    /* 仅负压电机转动：驱动轮保持 0 PWM，可通过发车键切换启停。 */
+    if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET) {
+      HAL_Delay(RUN_KEY_DEBOUNCE_MS);
+      if (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET) {
+        while (HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin) == GPIO_PIN_RESET) {
+          TelemetryStream_Poll();
+          HAL_Delay(1U);
+        }
+        HAL_Delay(RUN_KEY_DEBOUNCE_MS);
+        brushless_running = (uint8_t)!brushless_running;
+        Brushless_SetThrottle(brushless_running ? BRUSHLESS_ONLY_PULSE_SLOTS
+                                                : ESC_IDLE_PULSE_SLOTS);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13,
+                          brushless_running ? GPIO_PIN_RESET : GPIO_PIN_SET);
+      }
+    } else {
+      HAL_Delay(1U);
+    }
 #else
     uint32_t now_cyc = DWT->CYCCNT;
     uint32_t elapsed_cyc = now_cyc - last_control_cyc;

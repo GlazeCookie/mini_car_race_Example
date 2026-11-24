@@ -29,23 +29,26 @@
 #define NAV_CORNER_MAX_RATE_DPS  572.0f   /* 90° 直角折角目标角速度上限 (°/s) */
 
 /* 陀螺仪角度外环 + 角速度内环 PID（全局复用于巡线与丢线弯道寻线） */
-#define NAV_RATE_FF_GAIN         53.0f    /* 前馈：约 44 counts/s 差速对应 1 °/s 转向 */
-#define NAV_RATE_KP              70.0f    /* 角速度环 P */
-#define NAV_RATE_KI              260.0f   /* 角速度环 I */
+#define NAV_RATE_FF_GAIN         48.0f    /* 前馈：约 44 counts/s 差速对应 1 °/s 转向 */
+#define NAV_RATE_KP              53.0f    /* 角速度环 P */
+#define NAV_RATE_KI              220.0f   /* 角速度环 I */
 #define NAV_RATE_I_LIMIT         18000.0f /* 定角寻线角速度积分限幅 */
 #define NAV_FOLLOW_RATE_I_LIMIT  9000.0f  /* 连续巡线角速度积分限幅 */
 #define NAV_TURN_ANGLE_KP        10.0f    /* 角度外环 P (°/s per deg) */
 
 /* 丢线弯道定角寻线（由陀螺仪转向 PID 控速并把单向转角死死卡在 ±135° 内，绝不 180° 掉头） */
-#define NAV_SEARCH_TARGET_DEG    135.0f   /* 覆盖 90° 与 120° 弯，低于 180° 防掉头 */
-#define NAV_SEARCH_MAX_RATE_DPS  540.0f   /* 普通丢线寻线最大旋转角速度 (°/s)，保持高响应 */
-#define NAV_CORNER_SEARCH_RATE_DPS 594.0f /* 90° 折角/方框原地纯旋转寻线角速度上限 (°/s) */
-#define NAV_SEARCH_MIN_RATE_DPS  121.0f   /* 接近边界时最小旋转角速度 (°/s) */
-#define NAV_SEARCH_FWD_SPEED     4500.0f  /* 普通丢线轻弧线前移速度 (counts/s, ≈0.12 m/s)；直角触发后原地 0 速旋转 */
-#define NAV_SEARCH_SWEEP_MS      1500U    /* 兜底超时：超时仍未找到则向对称边界回扫 */
-#define NAV_RECAPTURE_MS         85U      /* 重新抓到线后的稳姿窗口 */
-#define NAV_RECAPTURE_SPEED      31200.0f /* 抓线瞬间限速 (counts/s, ≈0.84 m/s)，兼顾稳姿与连贯提速 */
-#define NAV_RECAPTURE_MAX_RATE   396.0f   /* 抓线窗口内目标角速度上限 (°/s) */
+#define NAV_SEARCH_TARGET_DEG        135.0f   /* 普通丢线覆盖 90° 与 120° 弯，低于 180° 防掉头 */
+#define NAV_CORNER_SEARCH_TARGET_DEG 120.0f   /* 90° 折角/方框丢线目标转角上限，兼顾斜入/打滑余量且防 180° 掉头 */
+#define NAV_CORNER_RESUME_FWD_DEG    65.0f    /* 原地旋满 65° 后车头已基本对准新跑道，开始带前速斜切抓线 */
+#define NAV_CORNER_RESUME_FWD_SPEED  16000.0f /* 原地旋过 65° 后的前移切线速度 (counts/s, ≈0.43 m/s)，防直冲飞出 */
+#define NAV_SEARCH_MAX_RATE_DPS      540.0f   /* 普通丢线寻线最大旋转角速度 (°/s)，保持高响应 */
+#define NAV_CORNER_SEARCH_RATE_DPS   594.0f   /* 90° 折角/方框原地纯旋转寻线角速度上限 (°/s) */
+#define NAV_SEARCH_MIN_RATE_DPS      121.0f   /* 接近边界时最小旋转角速度 (°/s) */
+#define NAV_SEARCH_FWD_SPEED         5000.0f  /* 普通/锯齿丢线微前移寻线速度 (counts/s, ≈0.13 m/s)，防尖端弯道外抛飞出 */
+#define NAV_SEARCH_SWEEP_MS          1500U    /* 兜底超时：超时仍未找到则向对称边界回扫 */
+#define NAV_RECAPTURE_MS             65U      /* 重新抓到线后的短稳姿窗口，稳住车身再全速加速 */
+#define NAV_RECAPTURE_SPEED          36000.0f /* 抓线瞬间限速 (counts/s, ≈0.97 m/s)，防重抓外侧灯珠后冲出 */
+#define NAV_RECAPTURE_MAX_RATE       396.0f   /* 抓线窗口内目标角速度上限 (°/s) */
 #define NAV_YAW_HOLD_KP          260.0f   /* 锁航向直行纠偏增益 (counts/s per deg) */
 
 /* 路口与断路几何参数（单位: mm） */
@@ -417,8 +420,19 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
     }
     s_lost_ms = accumulate_ms(s_lost_ms, dt_ms, 60000U);
 
-    /* 始终围绕丢线时刻航向在 ±135° 内做陀螺仪闭环扫线，绝不转到 180° 掉头 */
-    target_yaw = s_search_start_yaw + (float)s_search_dir * NAV_SEARCH_TARGET_DEG;
+    float search_target_deg = (s_search_fwd_spd <= 1.0f && s_search_phase == 0U)
+                                  ? NAV_CORNER_SEARCH_TARGET_DEG
+                                  : NAV_SEARCH_TARGET_DEG;
+    float turned_deg = (s_yaw_deg - s_search_start_yaw) * (float)s_search_dir;
+    float eff_search_fwd = s_search_fwd_spd;
+    if (s_gyro_ok && s_search_fwd_spd <= 1.0f && s_search_phase == 0U &&
+        turned_deg >= NAV_CORNER_RESUME_FWD_DEG) {
+      float ramp = clamp_f((turned_deg - NAV_CORNER_RESUME_FWD_DEG) / 20.0f, 0.25f, 1.0f);
+      eff_search_fwd = NAV_CORNER_RESUME_FWD_SPEED * ramp;
+    }
+
+    /* 始终围绕丢线时刻航向在目标角内做陀螺仪闭环扫线，绝不转到 180° 掉头 */
+    target_yaw = s_search_start_yaw + (float)s_search_dir * search_target_deg;
     rem = (target_yaw - s_yaw_deg) * (float)s_search_dir;
 
     if (rem <= 4.0f || s_lost_ms >= NAV_SEARCH_SWEEP_MS) {
@@ -428,15 +442,16 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
       gyro_rate_pid_reset();
       target_yaw = s_search_start_yaw + (float)s_search_dir * NAV_SEARCH_TARGET_DEG;
       rem = (target_yaw - s_yaw_deg) * (float)s_search_dir;
+      eff_search_fwd = s_search_fwd_spd;
     }
 
     if (s_gyro_ok) {
       float search_cap = (s_search_fwd_spd <= 1.0f) ? NAV_CORNER_SEARCH_RATE_DPS
                                                     : NAV_SEARCH_MAX_RATE_DPS;
-      rate_mag = clamp_f(NAV_TURN_ANGLE_KP * rem,
-                         NAV_SEARCH_MIN_RATE_DPS, search_cap);
+      float min_rate = NAV_SEARCH_MIN_RATE_DPS;
+      rate_mag = clamp_f(NAV_TURN_ANGLE_KP * rem, min_rate, search_cap);
       gyro_rate_pid_update(rate_mag * (float)s_search_dir, s_rate_lpf,
-                           s_search_fwd_spd, TRACK_MAX_REV_SPEED,
+                           eff_search_fwd, TRACK_MAX_REV_SPEED,
                            NAV_RATE_I_LIMIT, dt_s, out_l, out_r);
     } else {
       /* 无陀螺仪兜底时回退到温和差速 */
@@ -570,6 +585,7 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
   float eff_base = base_target;
   float eff_max_rate = max_rate_dps;
   float eff_max_rev = NAV_FOLLOW_MAX_REV_SPEED;
+  abs_err = fabsf(err);
   if (corner_active) {
     if (max_rate_dps >= NAV_FOLLOW_MAX_RATE_DPS && eff_max_rate < NAV_CORNER_MAX_RATE_DPS) {
       eff_max_rate = NAV_CORNER_MAX_RATE_DPS;
@@ -582,11 +598,19 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
   }
 
   /* 位置外环 PD 直接生成并限幅目标偏航角速度，由角速度内环主动闭环追踪，杜绝急弯甩过 180° */
-  abs_err = fabsf(err);
   d_rate = clamp_f(NAV_LINE_RATE_KD * s_err_rate_lpf,
                    -NAV_LINE_RATE_KD_LIM, NAV_LINE_RATE_KD_LIM);
   target_rate = clamp_f(NAV_LINE_RATE_KP * err + NAV_LINE_RATE_KP2 * err * abs_err + d_rate,
                         -eff_max_rate, eff_max_rate);
+  if (!corner_active) {
+    if (abs_err < 2.0f && fabsf(target_rate) < 150.0f) {
+      /* 仅当车身真正回到中心附近且无强入弯指令时禁止反转，消除出弯急刹顿挫，同时保留入弯咬线反转力矩 */
+      eff_max_rev = 0.0f;
+    } else if (s_recapture_ms > 0U) {
+      /* 重抓边缘灯珠时保留较强内轮反甩制动，防止车身直冲越过黑线 */
+      eff_max_rev = 22000.0f;
+    }
+  }
 
   abs_diff_5ms = fabsf(s_err_rate_lpf) * 0.005f;
   severity = abs_err;
@@ -600,7 +624,9 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
 
   scale = 1.0f - 0.085f * (severity - 4.5f);
   if (corner_active) {
-    scale = clamp_f(scale, 0.36f, 0.40f);
+    scale = clamp_f(scale, 0.34f, 0.38f);
+  } else if (s_recapture_ms > 0U) {
+    scale = clamp_f(scale, 0.78f, 1.0f);
   } else {
     scale = clamp_f(scale, 0.55f, 1.0f);
   }
@@ -800,9 +826,13 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       }
       break;
 
-    /* 2. 右下 2 峰锯齿 + 右下折角 + 2153/2375 弯道升至右中 250 方框十字（实测约 2890 mm） */
+    /* 2. 右下 2 峰锯齿 + 右下折角 + 2153/2375 短直道折弯升至右中 250 方框十字（实测约 2890 mm） */
     case TRK_ZIGZAG_1: {
-      float spd = (s_seg_mm < 1550.0f) ? TRACK_ZIGZAG_SPEED : TRACK_BASE_SPEED;
+      float spd = (s_seg_mm < 1680.0f)
+                      ? TRACK_ZIGZAG_SPEED
+                      : (((s_seg_mm <= 2500.0f) || s_seg_mm >= 2720.0f)
+                             ? TRACK_SQ_SPEED
+                             : TRACK_BASE_SPEED);
       float max_rate = (s_seg_mm < 1550.0f) ? NAV_FOLLOW_ZIG_RATE_DPS : NAV_FOLLOW_MAX_RATE_DPS;
       follow_line_pid(&scan, 0, spd, max_rate, dt_s, out_l, out_r);
       if (debounce_cond((s_seg_mm >= 2600.0f && is_crossroad(&scan)) ? 1U : 0U, 2U)) {
@@ -903,13 +933,19 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
     }
 
     /* 5. 右上八边形（十字直行进 -> 绕一圈 -> 十字直行出） */
-    case TRK_APPROACH_OCT:
-      follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+    case TRK_APPROACH_OCT: {
+      float oct_app_spd = (s_seg_mm < 320.0f ||
+                           (s_seg_mm >= 580.0f && s_seg_mm < 860.0f) ||
+                           s_seg_mm >= 1220.0f)
+                              ? TRACK_SQ_SPEED
+                              : TRACK_BASE_SPEED;
+      follow_line_pid(&scan, 0, oct_app_spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (debounce_cond((s_seg_mm >= 1350.0f && is_crossroad(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
         enter_state(TRK_OCT_IN);
       }
       break;
+    }
 
     case TRK_OCT_IN:
       follow_yaw_hold(s_yaw_ref, TRACK_CROSS_SPEED, out_l, out_r);
@@ -1069,7 +1105,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       if (s_seg_mm >= NAV_CROSS_PASS_MM) enter_state(TRK_LEFT_SQ1_LOOP);
       break;
     case TRK_LEFT_SQ1_LOOP:
-      follow_line_pid(&scan, 0, TRACK_BASE_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      follow_line_pid(&scan, 0, TRACK_SQ_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (debounce_cond((s_seg_mm >= 950.0f &&
                          (!s_gyro_ok || fabsf(s_yaw_seg) >= 210.0f) &&
                          is_crossroad(&scan)) ? 1U : 0U, 2U)) {
@@ -1275,8 +1311,13 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
     /* 11. 收尾：530+550+240 + 3峰锯齿 + 490 回发车区双横线停车 */
     case TRK_ZIGZAG_2: {
       uint8_t in_zig = (s_seg_mm >= 1150.0f && s_seg_mm <= 2250.0f) ? 1U : 0U;
+      float zig2_spd = (s_seg_mm >= 850.0f && s_seg_mm <= 2250.0f)
+                           ? TRACK_ZIGZAG_SPEED
+                           : ((s_seg_mm >= 280.0f && s_seg_mm <= 560.0f)
+                                  ? TRACK_SQ_SPEED
+                                  : TRACK_BASE_SPEED);
       follow_line_pid(&scan, 0,
-                      in_zig ? TRACK_ZIGZAG_SPEED : TRACK_BASE_SPEED,
+                      zig2_spd,
                       in_zig ? NAV_FOLLOW_ZIG_RATE_DPS : NAV_FOLLOW_MAX_RATE_DPS,
                       dt_s, out_l, out_r);
       if (s_seg_mm >= 2450.0f) enter_state(TRK_FINISH_ARMED);
