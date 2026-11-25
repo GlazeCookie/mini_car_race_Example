@@ -74,6 +74,11 @@ static uint8_t step(int32_t left, int32_t right, float *l, float *r) {
   return TrackNav_Step(left, right, 0.002f, l, r);
 }
 
+static uint8_t step_1ms(int32_t left, int32_t right, float *l, float *r) {
+  mock_tick += 1U;
+  return TrackNav_Step(left, right, 0.001f, l, r);
+}
+
 static void test_calibration_and_resilience(void) {
   float l, r;
   setup(TRK_START_CLEAR); TrackNav_Start();
@@ -115,10 +120,16 @@ static void test_calibration_and_resilience(void) {
 
 static void test_gap(void) {
   float l, r;
-  /* TRK_APPROACH_BROKEN 弯道段 (400+250，<720mm) 自动降速至 TRACK_HEX_SPEED 防冲弯丢线，>=720mm 切到 TRACK_BROKEN_SPEED 对接断路 */
-  setup(TRK_APPROACH_BROKEN); s_seg_mm = 200.0f; mock_line = 0x60;
+  /* TRK_APPROACH_BROKEN 入口前段保持 HEX 速，过两处 90° 弯道区间 (>=120..<720mm) 自动预减速防飞出，>=720mm 切到 BROKEN 对接断路 */
+  float exp_broken_corner = (TRACK_ZIGZAG_SPEED < TRACK_BROKEN_SPEED)
+                                ? TRACK_ZIGZAG_SPEED
+                                : TRACK_BROKEN_SPEED;
+  setup(TRK_APPROACH_BROKEN); s_seg_mm = 80.0f; mock_line = 0x60;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_BROKEN &&
          fabsf(l - TRACK_HEX_SPEED) < 1e-1f && fabsf(r - TRACK_HEX_SPEED) < 1e-1f);
+  s_seg_mm = 200.0f;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_BROKEN &&
+         fabsf(l - exp_broken_corner) < 1e-1f && fabsf(r - exp_broken_corner) < 1e-1f);
   s_seg_mm = 740.0f;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_BROKEN &&
          fabsf(l - TRACK_BROKEN_SPEED) < 1e-1f && fabsf(r - TRACK_BROKEN_SPEED) < 1e-1f);
@@ -159,6 +170,10 @@ static void test_gap(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_TL_SQ_PRE_T1 && r > l);
   s_yaw_deg = -75.0f; mock_line = 0x060;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_TL_SQ_TO_BL1);
+
+  /* 进入 200 mm 转角判定区后若已转南并居中 (0x060)，不得在同帧先把南向覆盖成 s_yaw_west */
+  setup(TRK_TL_SQ_PRE_T1); s_seg_mm = 220.0f; s_yaw_west = 0.0f; s_yaw_deg = -75.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && fabsf(s_yaw_west) < 1e-3f && s_state == TRK_TL_SQ_TO_BL1);
 }
 
 static void test_turn_and_reverse_diff(void) {
@@ -172,7 +187,10 @@ static void test_turn_and_reverse_diff(void) {
 
   s_seg_mm = 600.0f; s_yaw_deg = -355.0f; mock_line = 0x060;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_TL_SQ_TO_BL2);
-  s_seg_mm = 80.0f; mock_line = 0xFFF;
+  s_seg_mm = 10.0f; mock_line = 0xFFF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_TL_SQ_TO_BL2);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_TL_SQ_TO_BL2);
+  s_seg_mm = 30.0f; mock_line = 0xFFF;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_TL_SQ_TO_BL2);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_TL_SQ_EXIT_W);
   for (int i = 0; i < 4; ++i) assert(step(1000, 1000, &l, &r) == 0U);
@@ -230,12 +248,15 @@ static void test_square_and_hex_r_transitions(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_SQ_RM_LOOP);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_SQ_RM_OUT);
 
-  /* 420 段 220mm 起提前降速至 TRACK_HEX_SPEED；320mm 回流线 0xE60 与回正期单线右偏 0x0F8/0x078 不误触发；458mm 右侧分叉 0x3F8->0x3B8 才进环 */
-  setup(TRK_APPROACH_HEX_R); s_seg_mm = 240.0f; mock_line = 0x060;
+  /* 420 段 120mm 起提前降速至 TRACK_HEX_SPEED 且禁用 90° 锁存；320mm 回流线 0xE60 与单线右偏 0x0F8/0x078 不误触发；458mm 右侧分叉 0x3F8->0x3B8 才进环 */
+  setup(TRK_APPROACH_HEX_R); s_seg_mm = 130.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R &&
+         fabsf(l - TRACK_HEX_SPEED) < 1e-1f && fabsf(r - TRACK_HEX_SPEED) < 1e-1f);
+  s_seg_mm = 240.0f;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R &&
          fabsf(l - TRACK_HEX_SPEED) < 1e-1f && fabsf(r - TRACK_HEX_SPEED) < 1e-1f);
   setup(TRK_APPROACH_HEX_R); s_seg_mm = 325.0f; mock_line = 0xE60;
-  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R && s_corner_latch_ms == 0U);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R);
   s_seg_mm = 398.0f; mock_line = 0x0F8;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R);
@@ -247,6 +268,28 @@ static void test_square_and_hex_r_transitions(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_HEX_R);
   mock_line = 0x3B8;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_ENTER);
+
+  /* 八边形入口防错触发与防甩：1600mm 90° 弯降速且不误入十字；>=1700mm 靠近 1842mm 入口十字时禁用 90° 反甩锁存 (0xFC0)；真正十字稳切 OCT_IN */
+  setup(TRK_APPROACH_OCT); s_seg_mm = 1500.0f; mock_line = 0x060;
+  float exp_oct_corner = (TRACK_ZIGZAG_SPEED < TRACK_SQ_SPEED) ? TRACK_ZIGZAG_SPEED : TRACK_SQ_SPEED;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT &&
+         fabsf(0.5f * (l + r) - exp_oct_corner) < 1e-1f);
+  s_seg_mm = 1605.0f; mock_line = 0xFFF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT);
+  s_seg_mm = 1837.0f; mock_line = 0xFC0;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT && s_corner_latch_ms == 0U);
+  s_seg_mm = 1840.0f; mock_line = 0xFFF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_OCT_IN);
+
+  /* 八边形内第 7 角 (2110mm, yaw_seg=185°) 预减速且不得误提前退出；真实出口十字 (2352mm, yaw_seg=265°) 稳切 OCT_OUT */
+  setup(TRK_OCT_LOOP); s_seg_mm = 2110.0f; s_yaw_seg = 185.0f; mock_line = 0x3FF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_OCT_LOOP);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_OCT_LOOP);
+  s_seg_mm = 2352.0f; s_yaw_seg = 265.0f; mock_line = 0xFFF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_OCT_LOOP);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_OCT_OUT);
 
   /* 第 5 角单线宽块 0xFE0 (895mm, s_yaw_seg=-245°, 即使总角=-305°) 绝不得提前触发 HEX_R_EXIT；真实分叉 0x1CF->0x0FE 在 <=-275° 连贯切出 */
   setup(TRK_HEX_R_LOOP); s_yaw_ref = 170.0f; s_seg_mm = 895.0f; s_yaw_seg = -245.0f; s_yaw_deg = -135.0f;
@@ -274,8 +317,11 @@ static void test_square_and_hex_r_transitions(void) {
   mock_line = 0xFE0;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT && s_corner_latch_ms == 0U);
 
-  /* 320mm 双簇 0x1CF 在 830mm, s_yaw_seg=-265° 可稳定切出；若偏晚触发 (s_yaw_seg<=-315°) 自动跳过左咬直接右避让 */
+  /* 右中六边形：单灯坏点假双簇 0x005 (间隔仅 1 路暗管) 不得误触发出环；320mm 双簇 0x1CF 在 830mm, s_yaw_seg=-265° 可稳定切出；若偏晚触发 (s_yaw_seg<=-315°) 自动跳过左咬直接右避让 */
   setup(TRK_HEX_R_LOOP); s_yaw_ref = 170.0f; s_seg_mm = 830.0f; s_yaw_seg = -265.0f; s_yaw_deg = -140.0f;
+  mock_line = 0x005;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP);
   mock_line = 0x1CF;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT);
@@ -291,13 +337,21 @@ static void test_square_and_hex_r_transitions(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT);
 
-  /* -345° 兜底：若仍在 420mm 双簇分叉或未过 980mm，切进 HEX_R_EXIT 右咬保护段防重进第二圈；若单线且 >=980mm 才直切 APPROACH_OCT */
+  /* -345° 兜底：若仍在 420mm 双簇分叉、全丢线 (0x000) 或未过 980mm，切进 HEX_R_EXIT 右咬保护段防重进第二圈；仅见单线且 >=980mm 才直切 APPROACH_OCT */
   setup(TRK_HEX_R_LOOP); s_seg_mm = 900.0f; s_yaw_seg = -350.0f; mock_line = 0xF0C;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT && s_seg_mm >= 65.0f);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT && l > r);
 
+  setup(TRK_HEX_R_LOOP); s_seg_mm = 1000.0f; s_yaw_seg = -350.0f; mock_line = 0x000;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT && s_seg_mm >= 65.0f);
+
   setup(TRK_HEX_R_LOOP); s_seg_mm = 1000.0f; s_yaw_seg = -350.0f; mock_line = 0x0FF;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT && l > r);
+
+  /* 分叉首帧恰逢 1220 mm 里程兜底且转角仅 -290° (> -315°) 时，不能跳过前 65 mm 左咬而错切右选线 */
+  setup(TRK_HEX_R_LOOP); s_seg_mm = 1220.0f; s_yaw_seg = -290.0f; mock_line = 0x1CF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT && s_seg_mm < 65.0f);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_EXIT && r > l);
 
   /* 左下 200 六边形：单线弯 0x03C 不误触发；60° 交叉口 0x0E7 直行切入 -> 过滤第 5 角 0x7E0 -> 回原点 0x0E7 直行穿出 */
   setup(TRK_APPROACH_HEX_BL); s_seg_mm = 600.0f; mock_line = 0x03C;
@@ -318,6 +372,18 @@ static void test_square_and_hex_r_transitions(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_BL_EXIT);
   for (int i = 0; i < 4; ++i) assert(step(1000, 1000, &l, &r) == 0U);
   assert(s_state == TRK_APPROACH_HEX_MID);
+
+  /* 实车日志复现：TRK_HEX_BL_LOOP 第 5 角处 ch10 坏点产生 1-bit 假双簇 0x005 / 0x00D (mm=1094, yaw=273°) 绝不误出环；真实交叉口 0x0E5(即使 ch10 坏) 与 0x0E7 可正常出环 */
+  setup(TRK_HEX_BL_LOOP); s_seg_mm = 1094.0f; s_yaw_seg = 273.0f;
+  mock_line = 0x005;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_BL_LOOP);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_BL_LOOP);
+  mock_line = 0x00D;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_BL_LOOP);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_BL_LOOP);
+  mock_line = 0x0E5;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_BL_LOOP);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_BL_EXIT);
 
   /* 双六边形 300+200：内切过弯 0x0EF 在 ~380mm (<= -35°) 直行切入小 200 六边形 -> 过滤第 5 角 0x7E0 -> 1015mm 处 >=270° 直行穿回 300_L */
   setup(TRK_HEX_300_R); s_seg_mm = 380.0f; s_yaw_seg = -55.0f; mock_line = 0x0EF;
@@ -389,8 +455,18 @@ static void test_square_and_hex_r_transitions(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_300_EXIT && s_seg_mm >= 65.0f);
 
   setup(TRK_HEX_300_L); s_yaw_hex300 = 713.2f; s_yaw_hex300_valid = 1U;
+  s_seg_mm = 1400.0f; s_yaw_seg = -210.0f; s_yaw_deg = 714.0f; mock_line = 0x000;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_300_EXIT && s_seg_mm >= 65.0f);
+
+  setup(TRK_HEX_300_L); s_yaw_hex300 = 713.2f; s_yaw_hex300_valid = 1U;
   s_seg_mm = 1400.0f; s_yaw_seg = -210.0f; s_yaw_deg = 714.0f; mock_line = 0x060;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_ZIGZAG_2);
+
+  /* TRK_HEX_300_L 分叉首帧恰逢 1450 mm 兜底且 rel_yaw=38.8° (> 12°) 时，同样先保留前 65 mm 左咬 */
+  setup(TRK_HEX_300_L); s_yaw_hex300 = 713.2f; s_yaw_hex300_valid = 1U;
+  s_seg_mm = 1450.0f; s_yaw_seg = -168.9f; s_yaw_deg = 752.0f; mock_line = 0x1C3;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_300_EXIT && s_seg_mm < 65.0f);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_300_EXIT && r > l);
 
   /* 无陀螺仪降级模式下在 950mm 过滤第 3 角，在 1150mm 遇分叉正常出环 */
   setup(TRK_HEX_300_L); s_gyro_ok = 0U; s_seg_mm = 950.0f; mock_line = 0xFC0;
@@ -403,39 +479,57 @@ static void test_square_and_hex_r_transitions(void) {
 
 static void test_finish(void) {
   float l, r;
-  /* TRK_ZIGZAG_2 在 2360 mm 尚未提前臂合；单侧直角弯 0x0FF/0x1FF/0xFF8 或转弯角速度过大时绝不误触终点线或提前停车 */
-  setup(TRK_ZIGZAG_2); s_seg_mm = 2360.0f; mock_line = 0x0FF;
+  /* TRK_ZIGZAG_2 过最后 90° 弯 (2850~3150 mm) 自动降至 TRACK_SQ_SPEED 且尚未臂合；>=3180 mm 才切入 TRK_FINISH_ARMED */
+  setup(TRK_ZIGZAG_2); s_seg_mm = 2950.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_ZIGZAG_2 &&
+         fabsf(0.5f * (l + r) - TRACK_SQ_SPEED) < 1e-1f);
+  s_seg_mm = 3100.0f; mock_line = 0x0FF;
   for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
   assert(s_state == TRK_ZIGZAG_2);
+  s_seg_mm = 3180.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_ARMED);
 
   setup(TRK_FINISH_ARMED);
   mock_line = 0x1F8; /* 6 路普通白线 */
   for (int i = 0; i < 10; ++i) assert(step(0, 0, &l, &r) == 0U);
-  mock_line = 0x0FF; /* 单侧直角弯 ch0..7 */
+  mock_line = 0x0FF; /* 单侧直角弯 ch4..11 (n=8) */
   for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
-  mock_line = 0xFF8; /* 单侧直角弯 ch3..11 */
+  mock_line = 0xFF0; /* 单侧直角弯 ch0..7 (n=8) */
   for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
-  mock_line = 0x3FE; /* n=9 但 end_ch=9 < 10 */
+  mock_line = 0x1FF; /* 单侧直角弯 ch3..11 (start_ch=3 > 2) */
+  for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
+  mock_line = 0xFF8; /* 单侧直角弯 ch0..8 (end_ch=8 < 9) */
+  for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
+  mock_line = 0x3DF; /* 分裂双簇 n=9 但 max_width=5 < 8 */
   for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
   assert(s_state == TRK_FINISH_ARMED);
 
-  /* 转弯旋转期间即使宽线 0xFFF 也不判定为终点横线 */
-  mock_line = 0xFFF; mock_gyro = -2460; /* +150 °/s */
-  for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
-  assert(s_state == TRK_FINISH_ARMED);
-  mock_gyro = 0; s_rate_lpf = 0.0f; s_yaw_deg = 0.0f;
-
-  /* 第 1 圈直行碾过横跨两侧的第一条终点横线 (0x7FE) 触发 BAR1：不停车也不减速，保持 TRACK_BASE_SPEED 冲过第二条线切入第 2 圈 */
-  mock_line = 0x7FE;
-  for (int i = 0; i < 2; ++i) assert(step(0, 0, &l, &r) == 0U);
-  assert(s_state == TRK_FINISH_ARMED);
+  /* 正中 8 灯横线 (0x3FC, ch2..9) 满足双向边界，可稳定识别为终点横线 */
+  mock_line = 0x3FC;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_ARMED);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1 && s_lap == 1U);
+  setup(TRK_FINISH_ARMED);
+
+  /* 急弯高速旋转期间 (300 °/s > 220 °/s) 即使宽线 0xFFF 也不判定为终点横线 */
+  mock_line = 0x060; mock_gyro = -4920; /* +300 °/s 预热滤波角速度 */
+  for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
+  mock_line = 0xFFF;
+  for (int i = 0; i < 6; ++i) assert(step(0, 0, &l, &r) == 0U);
+  assert(s_state == TRK_FINISH_ARMED);
+
+  /* 第 1 圈出弯余振回正 (~150 °/s) 下碾过偏边 0x3FF -> 0xFFF，2 帧 (4 ms) 即稳定触发 BAR1：保持 TRACK_BASE_SPEED 冲过第 2 条线 */
+  mock_gyro = -2460; s_rate_lpf = 150.0f; s_yaw_deg = 0.0f;
+  mock_line = 0x3FF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_ARMED);
+  mock_line = 0xFFF;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1 && s_lap == 1U);
+  mock_gyro = 0; s_rate_lpf = 0.0f; s_yaw_deg = 0.0f;
   for (int i = 0; i < 20; ++i) assert(step(1200, 1200, &l, &r) == 0U);
   assert(s_state == TRK_FINISH_BAR1 && !s_finish_released);
   mock_line = 0x60;
-  for (int i = 0; i < 3; ++i) assert(step(0, 0, &l, &r) == 0U);
-  assert(s_finish_released);
-  assert(fabsf(l - TRACK_BASE_SPEED) < 1e-1f && fabsf(r - TRACK_BASE_SPEED) < 1e-1f);
+  assert(step(0, 0, &l, &r) == 0U && !s_finish_released);
+  assert(step(0, 0, &l, &r) == 0U && s_finish_released);
+  assert(fabsf(0.5f * (l + r) - TRACK_BASE_SPEED) < 1e-1f && fabsf(l - r) < 20.0f);
 
   /* 第 1 圈到达第二条横线前若再遇到单侧 90° 弯 0x1FF，仍保持寻线不提前切圈 */
   s_seg_mm = 340.0f; mock_line = 0x1FF;
@@ -447,34 +541,42 @@ static void test_finish(void) {
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1 &&
          fabsf(0.5f * (l + r) - TRACK_BASE_SPEED) < 1e-1f);
   mock_line = 0xFFF;
-  for (int i = 0; i < 2; ++i) assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_START_CLEAR && s_lap == 2U &&
          fabsf(s_seg_mm - NAV_LAP2_START_SEG_MM) < 1e-1f);
 
-  /* 第 1 圈若漏检第二条白线，越过 NAV_FINISH_LAP1_BYPASS_MM (550 mm) 后也自动切入第 2 圈而不滞留 */
-  setup(TRK_FINISH_BAR1); s_lap = 1U; s_finish_released = 1U; s_seg_mm = 550.0f; mock_line = 0x060;
+  /* 第 1 圈若漏检第二条白线，600 mm 尚未误触发兜底；越过 NAV_FINISH_LAP1_BYPASS_MM (700 mm) 后自动切入第 2 圈 */
+  setup(TRK_FINISH_BAR1); s_lap = 1U; s_finish_released = 1U; s_seg_mm = 600.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1 && s_lap == 1U);
+  s_seg_mm = 700.0f;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_START_CLEAR && s_lap == 2U && s_seg_mm > 450.0f);
+
+  /* 第 2 圈若漏检第二条白线，600 mm 仍在等待白线；越过 NAV_FINISH_LAP2_STOP_MM (680 mm) 后兜底刹停防跑第三圈 */
+  setup(TRK_FINISH_BAR1); s_lap = 2U; s_finish_released = 1U; s_seg_mm = 600.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1 && s_lap == 2U);
+  s_seg_mm = 680.0f;
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_DONE);
 
   /* 第 2 圈（停车圈）碾过第一条终点横线 (0x7FE) 进入 BAR1 后减速 30%（TRACK_BASE_SPEED * 0.70f），碾过第二条线 0xFFF 才完赛刹车停车 */
   setup(TRK_FINISH_ARMED); s_lap = 2U;
   mock_line = 0x7FE;
-  for (int i = 0; i < 3; ++i) assert(step(0, 0, &l, &r) == 0U);
-  assert(s_state == TRK_FINISH_BAR1 && s_lap == 2U);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_ARMED);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1 && s_lap == 2U);
   mock_line = 0x060;
-  for (int i = 0; i < 3; ++i) assert(step(0, 0, &l, &r) == 0U);
-  assert(s_finish_released);
+  assert(step(0, 0, &l, &r) == 0U && !s_finish_released);
+  assert(step(0, 0, &l, &r) == 0U && s_finish_released);
   assert(fabsf(l - 0.70f * TRACK_BASE_SPEED) < 1e-1f &&
          fabsf(r - 0.70f * TRACK_BASE_SPEED) < 1e-1f);
   s_seg_mm = 340.0f;
   mock_line = 0xFFF;
-  for (int i = 0; i < 2; ++i) assert(step(0, 0, &l, &r) == 0U);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f);
   for (int i = 0; i < 2; ++i) assert(step(0, 0, &l, &r) == 0U && s_state == TRK_DONE);
   assert(step(0, 0, &l, &r) == 1U && s_state == TRK_DONE && l == 0 && r == 0);
 
   /* 带速度踩到第 2 圈第二条终点横线时：高速阶段反接制动 -> 瞬时抱死/量化低速不提前断电 -> 回弹/重新滚快仍继续锁停或反接 -> 连续 4 帧停稳后彻底断电 (1U) */
   setup(TRK_FINISH_BAR1); s_lap = 2U; s_finish_released = 1U; s_seg_mm = 340.0f; mock_line = 0xFFF;
-  for (int i = 0; i < 2; ++i) assert(step(36, 36, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
+  assert(step(36, 36, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
   assert(step(36, 36, &l, &r) == 0U && s_state == TRK_DONE &&
          l == -NAV_FINISH_BRAKE_REV_SPEED && r == -NAV_FINISH_BRAKE_REV_SPEED);
   assert(step(3, 3, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f && s_finish_stop_ms == 0U);
@@ -539,15 +641,23 @@ static void test_search_never_stops(void) {
   /* 持续反向达到 4 帧或直接偏到外沿 (+7.0) 才会确认换向 */
   mock_line = 0x002; /* ch 10 -> +9.0 (>= 6.0) */
   assert(step(0, 0, &l, &r) == 0U && s_last_dir == 1);
+
+  /* 重抓自适应提前释放：大外偏 (0x001) 时保留稳姿限速不提前解锁；回正居中 (0x060) 后若 >=20ms 则提前清零恢复全速 */
+  s_recapture_ms = NAV_RECAPTURE_MS - 20U;
+  mock_line = 0x001;
+  assert(step(0, 0, &l, &r) == 0U && s_recapture_ms > 0U);
+  mock_line = 0x060; mock_gyro = 0; s_rate_lpf = 0.0f;
+  assert(step(0, 0, &l, &r) == 0U && s_recapture_ms == 0U);
 }
 
 static void test_follow_line_cascade(void) {
-  float l0, r0, l_fast, r_fast, l_exit, r_exit;
+  float l0, r0, l_fast, r_fast, l_exit, r_exit, l_curve, r_curve;
 
-  /* 极端外沿偏差 (+11.0) 下目标角速度被外环钳位在 NAV_FOLLOW_MAX_RATE_DPS，且当实测角速度超限时差速自动收缩 */
+  /* 极端外沿偏差 (+11.0 >= 8.0) 允许更低降速下限 (min_scale=0.48) 换取强内轮反转反甩；实测角速度超限时差速收缩 */
   setup(TRK_SQ_RM_LOOP);
   mock_line = 0x001; /* ch 11 -> +11.0 */
   assert(step(0, 0, &l0, &r0) == 0U && l0 > r0 && r0 >= -NAV_FOLLOW_MAX_REV_SPEED);
+  assert(0.5f * (l0 + r0) < 0.60f * TRACK_HEX_SPEED && r0 < -8000.0f);
 
   mock_gyro = -9840; /* 对应 +600 °/s 顺时针旋转 (> 495 °/s) */
   for (int i = 0; i < 8; ++i) {
@@ -555,13 +665,21 @@ static void test_follow_line_cascade(void) {
   }
   assert(s_rate_lpf > NAV_FOLLOW_MAX_RATE_DPS);
   assert((l_fast - r_fast) < (l0 - r0));
-  assert((l_fast - r_fast) < 2.0f * NAV_RATE_FF_GAIN * NAV_FOLLOW_MAX_RATE_DPS);
+  assert((l_fast - r_fast) < 2.0f * s_rate_pid_gains[TRK_SQ_RM_LOOP].kff * NAV_FOLLOW_MAX_RATE_DPS);
 
   /* 出弯刚刚压回中心线 (err = 0) 而车身仍在顺时针快转时，内环主动反打制动并压低前进基速，同时禁止外轮反接倒转消除顿挫 */
   mock_line = 0x060; /* ch 5,6 -> 0.0 */
   assert(step(0, 0, &l_exit, &r_exit) == 0U);
   assert(r_exit > l_exit && l_exit >= 0.0f);
   assert(0.5f * (l_exit + r_exit) < TRACK_BASE_SPEED);
+
+  /* 非最外沿常规弯道急变 (0x060 -> 0x004, err=+7.0 < 8.0) 保持 0.68f 平顺巡弯下限 */
+  setup(TRK_SQ_RM_LOOP);
+  mock_line = 0x060;
+  assert(step(0, 0, &l_curve, &r_curve) == 0U);
+  mock_line = 0x004;
+  assert(step(0, 0, &l_curve, &r_curve) == 0U &&
+         fabsf(0.5f * (l_curve + r_curve) - 0.68f * TRACK_HEX_SPEED) < 1.0f);
 
   /* 锯齿段目标角速度上限 (290 °/s) 比普通弯道 (320 °/s) 更收敛 */
   setup(TRK_ZIGZAG_1); s_seg_mm = 100.0f; mock_line = 0x001;
@@ -577,6 +695,27 @@ static void test_follow_line_cascade(void) {
   /* 无陀螺仪兜底时三环内环自动退化为前馈差速，仍能正常向右纠偏 */
   setup(TRK_ZIGZAG_1); s_gyro_ok = 0U; mock_line = 0x008; /* ch 8 -> +5.0 */
   assert(step(0, 0, &l_norm, &r_norm) == 0U && l_norm > r_norm && l_norm > 0.0f);
+}
+
+static void test_double_hex_corner_response(void) {
+  const TrackState loops[] = {TRK_HEX_300_R, TRK_HEX_200_LOOP, TRK_HEX_300_L};
+  for (unsigned i = 0; i < sizeof(loops) / sizeof(loops[0]); ++i) {
+    float left, right;
+    int turn_dir = (loops[i] == TRK_HEX_200_LOOP) ? 1 : -1;
+    setup(loops[i]);
+    mock_line = 0x060;
+    step_1ms(0, 0, &left, &right);
+    mock_line = (turn_dir > 0) ? 0x007 : 0xE00;
+    step_1ms(0, 0, &left, &right);
+    float initial_diff = (left - right) * turn_dir;
+    assert(initial_diff > 0.0f && left > 0.0f && right > 0.0f);
+    assert(s_prev_err == 9.0f * turn_dir);
+    for (int j = 0; j < 20; ++j) step_1ms(0, 0, &left, &right);
+    assert((left - right) * turn_dir > 2.0f * initial_diff);
+    mock_line = 0U;
+    step_1ms(0, 0, &left, &right);
+    assert(s_search_active && s_search_dir == turn_dir);
+  }
 }
 
 static void test_corner_latch_and_in_place_search(void) {
@@ -617,13 +756,13 @@ static void test_corner_latch_and_in_place_search(void) {
   s_yaw_deg = 117.0f;
   assert(step(0, 0, &l, &r) == 0U && s_search_dir == -1 && s_search_phase == 1U);
 
-  /* 锯齿出口经短直道折弯段保持降速限幅，不提前拉到 TRACK_BASE_SPEED */
+  /* 锯齿出口经短直道折弯段全程保持 TRACK_SQ_SPEED 平滑进十字，不再插 120 mm 全速脉冲 */
   setup(TRK_ZIGZAG_1); s_seg_mm = 1600.0f; mock_line = 0x060;
   assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_ZIGZAG_SPEED) < 1e-3f);
-  setup(TRK_ZIGZAG_1); s_seg_mm = 1800.0f; mock_line = 0x060;
-  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_SQ_SPEED) < 1e-3f);
   setup(TRK_ZIGZAG_1); s_seg_mm = 2600.0f; mock_line = 0x060;
-  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_BASE_SPEED) < 1e-3f);
+  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_SQ_SPEED) < 1e-3f);
+  setup(TRK_ZIGZAG_1); s_seg_mm = 2720.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - TRACK_SQ_SPEED) < 1e-3f);
 
   /* 重抓边缘灯珠 (err=+7.0) 时保留较强内轮反甩制动，不被 6000 限死 */
   setup(TRK_ZIGZAG_1); s_seg_mm = 1800.0f; s_recapture_ms = NAV_RECAPTURE_MS; mock_line = 0x004;
@@ -641,6 +780,41 @@ static void test_corner_latch_and_in_place_search(void) {
   assert(step(0, 0, &l, &r) == 0U && s_search_active && s_search_dir == 1 && s_search_fwd_spd == 0.0f);
 }
 
+static void test_1ms_control_rate(void) {
+  float l, r;
+
+  /* 1 ms 控制周期下陀螺仪低通滤波器保持约 3.7 ms 等效时间常数，不放大高频震动噪声 */
+  setup(TRK_ZIGZAG_1); mock_line = 0x060; mock_gyro = -1640; /* +100 °/s */
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_rate_lpf > 20.0f && s_rate_lpf < 23.0f);
+  for (int i = 0; i < 7; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U);
+  }
+  assert(s_rate_lpf > 80.0f && s_rate_lpf < 88.0f);
+
+  /* 1 ms 周期下断路连续丢线按物理时间 6 ms (6 帧) 确认，而非 3 ms */
+  setup(TRK_APPROACH_BROKEN); s_seg_mm = 860.0f; mock_line = 0x000;
+  for (int i = 0; i < 5; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_BROKEN);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BROKEN_CLEAR);
+
+  /* 1 ms 周期下终点横线消抖按物理时间 3 ms (3 帧) 确认 */
+  setup(TRK_FINISH_ARMED); mock_line = 0xFFF;
+  for (int i = 0; i < 2; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_ARMED);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
+
+  /* 1 ms 周期下重抓稳姿窗口按 1 ms 精确递减并在满 20 ms 回正时提前释放 */
+  setup(TRK_ZIGZAG_1); s_recapture_ms = NAV_RECAPTURE_MS; mock_line = 0x008;
+  for (int i = 0; i < 20; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_recapture_ms > 0U);
+  }
+  assert(s_recapture_ms == (NAV_RECAPTURE_MS - 20U));
+  mock_line = 0x060; mock_gyro = 0; s_rate_lpf = 0.0f;
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_recapture_ms == 0U);
+}
+
 int main(void) {
   test_calibration_and_resilience();
   test_gap();
@@ -649,7 +823,9 @@ int main(void) {
   test_finish();
   test_search_never_stops();
   test_follow_line_cascade();
+  test_double_hex_corner_response();
   test_corner_latch_and_in_place_search();
+  test_1ms_control_rate();
   puts("track navigation host tests: OK");
   return 0;
 }

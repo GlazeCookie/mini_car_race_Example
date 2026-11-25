@@ -22,16 +22,14 @@
 #define NAV_LINE_RATE_KP2        4.5f     /* 位置外环大偏差二次项 (°/s per err^2) */
 #define NAV_LINE_RATE_KD         0.050f   /* 位置外环微分超前 (°/s per (err/s)) */
 #define NAV_LINE_RATE_KD_LIM     140.0f   /* 位置外环微分限幅 (°/s)，提升入弯甩尾与出弯制动 */
+#define NAV_DOUBLE_HEX_ERR_TAU_S 0.004f   /* 双环岛环内位置反馈的一阶滤波时间常数（秒） */
 #define NAV_FOLLOW_MAX_REV_SPEED 26000.0f /* 正常巡线内轮允许最大反转速度 (counts/s, ≈0.70 m/s)，强化急弯甩尾 */
 #define NAV_CORNER_MAX_REV_SPEED 38000.0f /* 单侧 90° 直角折角内轮反甩上限 (counts/s, ≈1.02 m/s) */
 #define NAV_FOLLOW_MAX_RATE_DPS  495.0f   /* 正常弯道巡线目标角速度上限 (°/s) */
 #define NAV_FOLLOW_ZIG_RATE_DPS  429.0f   /* 锯齿急弯目标角速度上限 (°/s)，保持高节奏同时防掉头 */
 #define NAV_CORNER_MAX_RATE_DPS  572.0f   /* 90° 直角折角目标角速度上限 (°/s) */
 
-/* 陀螺仪角度外环 + 角速度内环 PID（全局复用于巡线与丢线弯道寻线） */
-#define NAV_RATE_FF_GAIN         48.0f    /* 前馈：约 44 counts/s 差速对应 1 °/s 转向 */
-#define NAV_RATE_KP              53.0f    /* 角速度环 P */
-#define NAV_RATE_KI              220.0f   /* 角速度环 I */
+/* 陀螺仪角度外环 + 角速度内环 PID（用于巡线与丢线弯道寻线） */
 #define NAV_RATE_I_LIMIT         18000.0f /* 定角寻线角速度积分限幅 */
 #define NAV_FOLLOW_RATE_I_LIMIT  9000.0f  /* 连续巡线角速度积分限幅 */
 #define NAV_TURN_ANGLE_KP        10.0f    /* 角度外环 P (°/s per deg) */
@@ -46,32 +44,83 @@
 #define NAV_SEARCH_MIN_RATE_DPS      121.0f   /* 接近边界时最小旋转角速度 (°/s) */
 #define NAV_SEARCH_FWD_SPEED         5000.0f  /* 普通/锯齿丢线微前移寻线速度 (counts/s, ≈0.13 m/s)，防尖端弯道外抛飞出 */
 #define NAV_SEARCH_SWEEP_MS          1500U    /* 兜底超时：超时仍未找到则向对称边界回扫 */
-#define NAV_RECAPTURE_MS             65U      /* 重新抓到线后的短稳姿窗口，稳住车身再全速加速 */
-#define NAV_RECAPTURE_SPEED          36000.0f /* 抓线瞬间限速 (counts/s, ≈0.97 m/s)，防重抓外侧灯珠后冲出 */
-#define NAV_RECAPTURE_MAX_RATE       396.0f   /* 抓线窗口内目标角速度上限 (°/s) */
+#define NAV_RECAPTURE_MS             65U      /* 重新抓到线后的短稳姿窗口，大外偏退线最长达 ~62 ms，回正即提前释放 */
+#define NAV_RECAPTURE_SPEED          48000.0f /* 抓线瞬间限速 (counts/s, ≈1.29 m/s)，防重抓外侧灯珠后冲出 */
+#define NAV_RECAPTURE_MAX_RATE       495.0f   /* 抓线窗口内目标角速度上限 (°/s) */
 #define NAV_YAW_HOLD_KP          260.0f   /* 锁航向直行纠偏增益 (counts/s per deg) */
 
 /* 路口与断路几何参数（单位: mm） */
 #define NAV_CROSS_PASS_MM        95.0f    /* 穿十字直行距离 */
 #define NAV_BROKEN_CLEAR_MM      100.0f   /* 断路直行离端头距离 */
+#define NAV_BROKEN_MISS_MS       6U       /* 断路入口连续丢线确认时间（等价原 2 ms×3 帧） */
 #define NAV_BROKEN_SEEK_MM       580.0f   /* 断路 +20° 斜插距离（覆盖 650mm 跨距再开始回扫） */
 #define NAV_BROKEN_SWEEP_MM      820.0f   /* 超过后进一步扩大扫线角度 */
 #define NAV_BROKEN_ALIGN_MIN_MM  60.0f    /* 抓到对面线后最小巡线对齐距离 */
 #define NAV_BROKEN_ALIGN_MAX_MM  180.0f   /* 抓线后超过该距离直接切入下一段 */
 #define NAV_BROKEN_ALIGN_LOST_MS 150U     /* 对齐阶段连续丢线超时后退回扫线 */
-#define NAV_BROKEN_OFFSET_DEG    48.0f    /* 右->左过断路向右(北)偏转 34° */
+#define NAV_BROKEN_OFFSET_DEG    54.0f    /* 右->左过断路向右(北)偏转 34° */
 #define NAV_TARGET_LAPS              2U       /* 跑完 2 圈后在终点双横线停车 */
-#define NAV_LAP2_START_SEG_MM        300.0f   /* 第 1 圈终点第二条白线后进入第 2 圈，保留 600 mm 起步屏蔽 */
-#define NAV_FINISH_ACTIVE_COUNT      9U       /* 终点双横线至少 9 路有效且横跨两侧边界 */
-#define NAV_FINISH_MAX_RATE_DPS      90.0f    /* 仅在直行姿态判定终点横线，过滤急弯与 90° 角 */
-#define NAV_FINISH_DEBOUNCE_MS       6U
+#define NAV_LAP2_START_SEG_MM        420.0f   /* 第 1 圈终点第二条白线位于起跑线 ~420 mm 处，进入第 2 圈保留 ~480 mm 起步屏蔽 */
+#define NAV_FINISH_ACTIVE_COUNT      8U       /* 终点双横线至少 8 路连续有效且横跨两侧边界(ch<=2..ch>=9) */
+#define NAV_FINISH_MAX_RATE_DPS      220.0f   /* 放宽终点直道姿态容差，过滤急弯旋转态 */
+#define NAV_FINISH_DEBOUNCE_MS       3U
 #define NAV_FINISH_APPROACH_SPEED    (TRACK_BASE_SPEED * 0.70f) /* 停车圈过第一条终点横线后减速 30% */
-#define NAV_FINISH_LAP1_BYPASS_MM    550.0f   /* 第 1 圈若漏检第二条白线，越过发车区后自动切入第 2 圈 */
+#define NAV_FINISH_LAP1_BYPASS_MM    700.0f   /* 第 1 圈若漏检第二条白线，越过发车区后自动切入第 2 圈 */
+#define NAV_FINISH_LAP2_STOP_MM      680.0f   /* 第 2 圈若漏检第二条白线，越过发车线后兜底刹车停车 */
 #define NAV_FINISH_BRAKE_REV_SPEED   12000.0f /* 踩到第二条终点横线后主动反接制动目标 (counts/s) */
 #define NAV_FINISH_BRAKE_FAST_SPEED  2000.0f  /* 高于此轮速施加强反接制动，低于后切 0 闭环锁停 */
 #define NAV_FINISH_STOP_SPEED        1000.0f  /* 双轮均降到此轮速以下视为进入停稳速度带 */
 #define NAV_FINISH_STOP_HOLD_MS      8U       /* 双轮需连续保持停稳带 8 ms (4 帧) 才切断电机，防量化/打滑误松刹 */
 #define NAV_FINISH_BRAKE_MAX_MS      220U     /* 主动制动保护超时 */
+
+typedef struct {
+  float kp;
+  float ki;
+  float kd;
+  float kff; /* 每 1 °/s 目标角速度对应的单侧轮速修正量 (counts/s) */
+} NavRatePidGains;
+
+/* 各段按 {Kp, Ki, Kd, Kff} 设置，单段可在表中直接填写四个数。 */
+#define NAV_RATE_PID_DEFAULT { 55.0f, 220.0f, 0.0f, 49.0f }
+#define NAV_RATE_PID_ZIGZAG { 53.0f, 230.0f, 0.0f, 51.0f }
+#define NAV_RATE_PID_HEX { 50.0f, 210.0f, 0.0f, 47.0f }
+#define NAV_RATE_PID_SQ { 55.0f, 220.0f, 0.0f, 54.0f }
+/* 这里列出使用角速度内环的状态。同段巡线、丢线寻线共用一行。
+ * 锁航向过路口和盲走使用 follow_yaw_hold 的航向控制。 */
+static const NavRatePidGains s_rate_pid_gains[] = {
+  [TRK_START_CLEAR]      = NAV_RATE_PID_DEFAULT,
+  [TRK_ZIGZAG_1]         = NAV_RATE_PID_ZIGZAG, /* 右下连续弯及其出口直角 */
+  [TRK_SQ_RM_LOOP]        = NAV_RATE_PID_SQ,
+  [TRK_APPROACH_HEX_R]    = NAV_RATE_PID_DEFAULT,
+  [TRK_HEX_R_ENTER]       = NAV_RATE_PID_DEFAULT,
+  [TRK_HEX_R_LOOP]        = NAV_RATE_PID_HEX, /* 右中六边形绕行 */
+  [TRK_HEX_R_EXIT]        = NAV_RATE_PID_DEFAULT,
+  [TRK_APPROACH_OCT]      = NAV_RATE_PID_SQ,
+  [TRK_OCT_LOOP]          = NAV_RATE_PID_DEFAULT,
+  [TRK_APPROACH_BROKEN]   = NAV_RATE_PID_DEFAULT,
+  [TRK_BROKEN_ALIGN]      = NAV_RATE_PID_DEFAULT,
+  [TRK_TL_SQ_PRE_T1]      = NAV_RATE_PID_SQ,
+  [TRK_TL_SQ_TO_BL1]      = NAV_RATE_PID_SQ,
+  [TRK_TL_SQ_TO_TR2]      = NAV_RATE_PID_SQ,
+  [TRK_TL_SQ_TO_BL2]      = NAV_RATE_PID_SQ,
+  [TRK_LEFT_SQ1_PRE]      = NAV_RATE_PID_SQ,
+  [TRK_LEFT_SQ1_LOOP]     = NAV_RATE_PID_SQ,
+  [TRK_LEFT_SQ2_PRE]      = NAV_RATE_PID_SQ,
+  [TRK_LEFT_SQ2_LOOP]     = NAV_RATE_PID_SQ,
+  [TRK_LEFT_SQ3_PRE]      = NAV_RATE_PID_SQ,
+  [TRK_LEFT_SQ3_LOOP]     = NAV_RATE_PID_SQ,
+  [TRK_APPROACH_HEX_BL]   = NAV_RATE_PID_DEFAULT,
+  [TRK_HEX_BL_LOOP]       = NAV_RATE_PID_DEFAULT,
+  [TRK_APPROACH_HEX_MID]  = NAV_RATE_PID_DEFAULT,
+  [TRK_HEX_300_ENTER]     = NAV_RATE_PID_DEFAULT,
+  [TRK_HEX_300_R]         = NAV_RATE_PID_DEFAULT,
+  [TRK_HEX_200_LOOP]      = NAV_RATE_PID_HEX,
+  [TRK_HEX_300_L]         = NAV_RATE_PID_DEFAULT,
+  [TRK_HEX_300_EXIT]      = NAV_RATE_PID_DEFAULT,
+  [TRK_ZIGZAG_2]          = NAV_RATE_PID_DEFAULT,
+  [TRK_FINISH_ARMED]      = NAV_RATE_PID_DEFAULT,
+  [TRK_FINISH_BAR1]       = NAV_RATE_PID_DEFAULT,
+};
 
 static TrackState s_state = TRK_START_CLEAR;
 static TrackState s_fault_state = TRK_START_CLEAR;
@@ -99,6 +148,7 @@ static float s_yaw_hex300 = 0.0f;    /* 中左 300 双环岛入口 590/530 东�
 static uint8_t s_yaw_hex300_valid = 0U;
 
 static float s_prev_err = 0.0f;
+static float s_prev_control_err = 0.0f; /* 上一拍用于转向控制的偏差 */
 static float s_err_rate_lpf = 0.0f;
 static uint8_t s_has_prev_err = 0U;
 static int8_t s_last_dir = 0;        /* 持久保留最近明显偏差方向：-1 左, +1 右 */
@@ -111,7 +161,9 @@ static float s_search_start_yaw = 0.0f;
 static uint16_t s_lost_ms = 0U;
 static uint16_t s_recapture_ms = 0U;
 static float s_rate_pid_integral = 0.0f;
-static uint8_t s_broken_miss_cnt = 0U;
+static float s_rate_pid_prev_rate = 0.0f;
+static uint8_t s_rate_pid_has_prev_rate = 0U;
+static uint16_t s_broken_miss_ms = 0U;
 static uint8_t s_cross_debounce = 0U;
 static int8_t s_corner_dir = 0;      /* 单侧 90° 折角锁存方向（防离角残留灯触发反向 D 项/假翻向） */
 static uint16_t s_corner_latch_ms = 0U;
@@ -126,6 +178,7 @@ static float clamp_f(float v, float lo, float hi) {
 
 static void gyro_rate_pid_reset(void) {
   s_rate_pid_integral = 0.0f;
+  s_rate_pid_has_prev_rate = 0U;
 }
 
 /* 陀螺仪角速度内环 PID（含物理前馈、反饱和积分与过弯回正泄放），将目标偏航角速度转为左右轮目标差速 */
@@ -133,7 +186,8 @@ static void gyro_rate_pid_update(float target_rate_dps, float measured_rate_dps,
                                  float forward_spd, float max_rev_spd,
                                  float i_limit, float dt_s,
                                  float *out_l, float *out_r) {
-  float ff = NAV_RATE_FF_GAIN * target_rate_dps;
+  const NavRatePidGains *gains = &s_rate_pid_gains[s_state];
+  float ff = gains->kff * target_rate_dps;
   float max_diff_fwd = TRACK_MAX_SPEED - fabsf(forward_spd);
   float max_diff_rev = fabsf(forward_spd) + max_rev_spd;
   float max_diff = (max_diff_fwd < max_diff_rev) ? max_diff_fwd : max_diff_rev;
@@ -144,6 +198,7 @@ static void gyro_rate_pid_update(float target_rate_dps, float measured_rate_dps,
   if (s_gyro_ok) {
     float err;
     float cand_i;
+    float pd;
 
     /* 出弯回直或 S 弯反打时快速泄放旧方向积分，避免惯性反拖出线 */
     if (fabsf(target_rate_dps) < 15.0f) {
@@ -156,13 +211,26 @@ static void gyro_rate_pid_update(float target_rate_dps, float measured_rate_dps,
     }
 
     err = target_rate_dps - measured_rate_dps;
-    cand_i = clamp_f(s_rate_pid_integral + NAV_RATE_KI * err * dt_s,
+    pd = gains->kp * err;
+    /* 微分用滤波后的实测角速度，目标角速度变化时不会直接冲击 D 项。 */
+    if (gains->kd != 0.0f) {
+      if (s_gyro_fail_cnt == 0U && dt_s > 1e-6f) {
+        if (s_rate_pid_has_prev_rate) {
+          pd -= gains->kd * (measured_rate_dps - s_rate_pid_prev_rate) / dt_s;
+        }
+        s_rate_pid_prev_rate = measured_rate_dps;
+        s_rate_pid_has_prev_rate = 1U;
+      } else {
+        s_rate_pid_has_prev_rate = 0U;
+      }
+    }
+    cand_i = clamp_f(s_rate_pid_integral + gains->ki * err * dt_s,
                      -i_limit, i_limit);
-    diff = ff + NAV_RATE_KP * err + cand_i;
+    diff = ff + pd + cand_i;
     if ((diff <= max_diff || err < 0.0f) && (diff >= -max_diff || err > 0.0f)) {
       s_rate_pid_integral = cand_i;
     } else {
-      diff = ff + NAV_RATE_KP * err + s_rate_pid_integral;
+      diff = ff + pd + s_rate_pid_integral;
     }
   } else {
     diff = ff;
@@ -178,7 +246,7 @@ static void enter_state(TrackState next) {
   s_seg_mm = 0.0f;
   s_yaw_seg = 0.0f;
   s_cross_debounce = 0U;
-  s_broken_miss_cnt = 0U;
+  s_broken_miss_ms = 0U;
   s_corner_dir = 0;
   s_corner_latch_ms = 0U;
   s_corner_override_prev = 0U;
@@ -280,24 +348,35 @@ static uint8_t is_crossroad(const LineScanResult *scan) {
           scan->clusters[scan->cluster_count - 1U].end_ch >= 9U) ? 1U : 0U;
 }
 
+/* 两簇之间至少间隔 >= 2 路暗管才视为有效分叉，过滤单灯坏点/闪断产生的 1-bit 假双簇 (如 0x005/0x00D) */
+static uint8_t has_separated_clusters(const LineScanResult *scan) {
+  uint8_t i;
+  for (i = 0U; i + 1U < scan->cluster_count; ++i) {
+    if ((uint8_t)(scan->clusters[i + 1U].start_ch - scan->clusters[i].end_ch) >= 3U) {
+      return 1U;
+    }
+  }
+  return 0U;
+}
+
 static uint8_t is_left_branch(const LineScanResult *scan) {
-  if (scan->cluster_count >= 2U) return 1U;
+  if (has_separated_clusters(scan)) return 1U;
   if (scan->active_count >= 5U && scan->clusters[0].start_ch <= 1U) return 1U;
   return 0U;
 }
 
-/* 六边形 60° 交叉口判据：双簇分离或至少 6 路有效，避免单线弯道(如 0x03C/0x1E0)误判 */
+/* 六边形 60° 交叉口判据：真实双簇分离(间隔>=2路暗管)或至少 6 路有效，避免单线弯道(0x03C/0x1E0)及单灯坏点假双簇(0x005/0x00D)误判 */
 static uint8_t is_hex_junction(const LineScanResult *scan) {
-  return (scan->cluster_count >= 2U || scan->active_count >= 6U) ? 1U : 0U;
+  return (has_separated_clusters(scan) || scan->active_count >= 6U) ? 1U : 0U;
 }
 
-/* 终点横线须同时覆盖传感器最左与最右端(ch<=1..ch>=10)且连续宽度>=9，过滤 0x0FF/0x1FF/0xFF8 等单侧直角弯 */
+/* 终点横线须同时覆盖传感器左右两侧(ch<=2..ch>=9)且连续宽度>=8，过滤 0x0FF/0x1FF/0xFF8 等单侧直角弯 */
 static uint8_t is_finish_bar(const LineScanResult *scan) {
   if (scan->cluster_count == 0U) return 0U;
   return (scan->active_count >= NAV_FINISH_ACTIVE_COUNT &&
-          scan->max_width >= 9U &&
-          scan->clusters[0].start_ch <= 1U &&
-          scan->clusters[scan->cluster_count - 1U].end_ch >= 10U &&
+          scan->max_width >= 8U &&
+          scan->clusters[0].start_ch <= 2U &&
+          scan->clusters[scan->cluster_count - 1U].end_ch >= 9U &&
           (!s_gyro_ok || fabsf(s_rate_lpf) <= NAV_FINISH_MAX_RATE_DPS)) ? 1U : 0U;
 }
 
@@ -342,6 +421,7 @@ static int8_t detect_single_side_corner(const LineScanResult *scan) {
 /* 六边形/八边形 45°~60° 柔和转弯与刚出环汇入直道前不启用 90° 猛反甩锁存 */
 static uint8_t allow_90deg_corner_snap(void) {
   switch (s_state) {
+    case TRK_APPROACH_HEX_R:
     case TRK_HEX_R_ENTER:
     case TRK_HEX_R_LOOP:
     case TRK_HEX_R_EXIT:
@@ -361,7 +441,7 @@ static uint8_t allow_90deg_corner_snap(void) {
     case TRK_LEFT_SQ1_LOOP:
       return (s_seg_mm >= 950.0f && s_gyro_ok && fabsf(s_yaw_seg) >= 210.0f) ? 0U : 1U;
     case TRK_APPROACH_OCT:
-      return (s_seg_mm >= 220.0f) ? 1U : 0U;
+      return (s_seg_mm >= 220.0f && s_seg_mm < 1700.0f) ? 1U : 0U;
     case TRK_ZIGZAG_2:
       return (s_seg_mm >= 200.0f) ? 1U : 0U;
     default:
@@ -572,20 +652,32 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
     }
   }
 
-  raw_err_rate = (s_has_prev_err && dt_s > 1e-6f) ? ((err - s_prev_err) / dt_s) : 0.0f;
+  float prev_err = s_prev_err;
+  s_prev_err = err; /* 选簇和赛段判断始终使用本拍实际看到的位置。 */
+  if (s_has_prev_err && (s_state == TRK_HEX_300_R || s_state == TRK_HEX_200_LOOP ||
+                         s_state == TRK_HEX_300_L)) {
+    prev_err = s_prev_control_err;
+    float alpha = dt_s / (NAV_DOUBLE_HEX_ERR_TAU_S + dt_s);
+    err = prev_err + alpha * (err - prev_err);
+  }
+  s_prev_control_err = err;
+  raw_err_rate = (s_has_prev_err && dt_s > 1e-6f) ? ((err - prev_err) / dt_s) : 0.0f;
   if (s_has_prev_err) {
     float alpha = (dt_s > 0.0f) ? (dt_s / (0.003f + dt_s)) : 0.40f;
     s_err_rate_lpf += alpha * (raw_err_rate - s_err_rate_lpf);
   } else {
     s_err_rate_lpf = 0.0f;
   }
-  s_prev_err = err;
   s_has_prev_err = 1U;
 
   float eff_base = base_target;
   float eff_max_rate = max_rate_dps;
   float eff_max_rev = NAV_FOLLOW_MAX_REV_SPEED;
   abs_err = fabsf(err);
+  if (s_recapture_ms > 0U && s_recapture_ms <= (NAV_RECAPTURE_MS - 20U) &&
+      abs_err <= 2.5f && (!s_gyro_ok || fabsf(s_rate_lpf) <= 180.0f)) {
+    s_recapture_ms = 0U;
+  }
   if (corner_active) {
     if (max_rate_dps >= NAV_FOLLOW_MAX_RATE_DPS && eff_max_rate < NAV_CORNER_MAX_RATE_DPS) {
       eff_max_rate = NAV_CORNER_MAX_RATE_DPS;
@@ -622,13 +714,14 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
   rate_sev = peak_rate / 85.0f;
   if (rate_sev > severity) severity = rate_sev;
 
-  scale = 1.0f - 0.085f * (severity - 4.5f);
+  scale = 1.0f - 0.085f * (severity - 5.5f);
   if (corner_active) {
     scale = clamp_f(scale, 0.34f, 0.38f);
   } else if (s_recapture_ms > 0U) {
-    scale = clamp_f(scale, 0.78f, 1.0f);
+    scale = clamp_f(1.0f - 0.10f * (severity - 4.5f), 0.50f, 1.0f);
   } else {
-    scale = clamp_f(scale, 0.55f, 1.0f);
+    float min_scale = (abs_err >= 8.0f) ? 0.48f : 0.68f;
+    scale = clamp_f(scale, min_scale, 1.0f);
   }
   base_spd = eff_base * scale;
 
@@ -645,6 +738,7 @@ static void follow_yaw_hold(float target_yaw, float speed, float *out_l, float *
   *out_r = clamp_f(speed - corr, -TRACK_MAX_REV_SPEED, TRACK_MAX_SPEED);
   s_has_prev_err = 0U;
   s_err_rate_lpf = 0.0f;
+  s_rate_pid_has_prev_rate = 0U;
 }
 
 void TrackNav_Start(void) {
@@ -807,7 +901,10 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
   s_yaw_deg += raw_rate * dt_s * NAV_GYRO_SCALE;
   s_yaw_seg += raw_rate * dt_s * NAV_GYRO_SCALE;
-  s_rate_lpf = 0.65f * s_rate_lpf + 0.35f * raw_rate;
+  {
+    float rate_alpha = (dt_s > 0.0f) ? (dt_s / (0.003714f + dt_s)) : 0.35f;
+    s_rate_lpf += rate_alpha * (raw_rate - s_rate_lpf);
+  }
 
   step_mm = 500.0f * ((float)left_delta / TRACK_LEFT_COUNTS_PER_METER +
                       (float)right_delta / TRACK_RIGHT_COUNTS_PER_METER);
@@ -828,11 +925,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     /* 2. 右下 2 峰锯齿 + 右下折角 + 2153/2375 短直道折弯升至右中 250 方框十字（实测约 2890 mm） */
     case TRK_ZIGZAG_1: {
-      float spd = (s_seg_mm < 1680.0f)
-                      ? TRACK_ZIGZAG_SPEED
-                      : (((s_seg_mm <= 2500.0f) || s_seg_mm >= 2720.0f)
-                             ? TRACK_SQ_SPEED
-                             : TRACK_BASE_SPEED);
+      float spd = (s_seg_mm < 1680.0f) ? TRACK_ZIGZAG_SPEED : TRACK_SQ_SPEED;
       float max_rate = (s_seg_mm < 1550.0f) ? NAV_FOLLOW_ZIG_RATE_DPS : NAV_FOLLOW_MAX_RATE_DPS;
       follow_line_pid(&scan, 0, spd, max_rate, dt_s, out_l, out_r);
       if (debounce_cond((s_seg_mm >= 2600.0f && is_crossroad(&scan)) ? 1U : 0U, 2U)) {
@@ -865,7 +958,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     /* 4. 右中 200 六边形（跳过 320mm 处左侧回流线 860..7E0，在 420mm 右侧分叉 3F8/3B8 前预减速切入 -> 绕一圈 -> 左偏出到 330） */
     case TRK_APPROACH_HEX_R: {
-      float spd = (s_seg_mm >= 220.0f) ? TRACK_HEX_SPEED : TRACK_BASE_SPEED;
+      float spd = (s_seg_mm >= 120.0f) ? TRACK_HEX_SPEED : TRACK_BASE_SPEED;
       follow_line_pid(&scan, 0, spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (debounce_cond((s_seg_mm >= 360.0f && is_hex_junction(&scan) &&
                          scan.clusters[scan.cluster_count - 1U].end_ch >= 8U) ? 1U : 0U, 2U)) {
@@ -877,12 +970,12 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     case TRK_HEX_R_ENTER:
       follow_line_pid(&scan, -1, TRACK_HEX_R_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (s_seg_mm >= 120.0f) enter_state(TRK_HEX_R_LOOP);
+      if (s_seg_mm >= 135.0f) enter_state(TRK_HEX_R_LOOP);
       break;
 
     case TRK_HEX_R_LOOP: {
       float hex_total_yaw = s_yaw_deg - s_yaw_ref;
-      uint8_t exit_fork = (scan.cluster_count >= 2U &&
+      uint8_t exit_fork = (has_separated_clusters(&scan) &&
                            s_seg_mm >= 820.0f &&
                            (s_gyro_ok ? (s_yaw_seg <= -265.0f || hex_total_yaw <= -300.0f)
                                       : (s_seg_mm >= 900.0f))) ||
@@ -899,13 +992,16 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
           s_seg_mm = 70.0f;
         }
       } else if (s_yaw_seg <= -345.0f || s_seg_mm >= 1220.0f) {
-        if (scan.cluster_count <= 1U && s_seg_mm >= 980.0f) {
+        if (scan.cluster_count == 1U && s_seg_mm >= 980.0f) {
           /* 兜底：已单线且走足 980mm 确在 330 直道上，直接进 APPROACH_OCT，防止下个直角弯错触发 */
           enter_state(TRK_APPROACH_OCT);
         } else {
-          /* 若仍在 420mm 双簇分叉或未满 980mm，切进 HEX_R_EXIT 右咬保护段防重进第二圈 */
+          /* 兜底进 HEX_R_EXIT：仅已转过 -315°（或无陀螺仪）才跳过前段左咬，防止 1220mm 与 320mm 回流口撞帧错选右 */
+          uint8_t late_trigger = (!s_gyro_ok || s_yaw_seg <= -315.0f) ? 1U : 0U;
           enter_state(TRK_HEX_R_EXIT);
-          s_seg_mm = 70.0f;
+          if (late_trigger) {
+            s_seg_mm = 70.0f;
+          }
         }
       }
       break;
@@ -925,7 +1021,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       }
       follow_line_pid(&scan, exit_pick, TRACK_HEX_R_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (s_seg_mm >= 195.0f &&
-          (scan.cluster_count <= 1U || s_seg_mm >= 240.0f) &&
+          (scan.cluster_count == 1U || s_seg_mm >= 240.0f) &&
           (!s_gyro_ok || hex_total_yaw <= -335.0f || s_seg_mm >= 240.0f)) {
         enter_state(TRK_APPROACH_OCT);
       }
@@ -934,13 +1030,18 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     /* 5. 右上八边形（十字直行进 -> 绕一圈 -> 十字直行出） */
     case TRK_APPROACH_OCT: {
-      float oct_app_spd = (s_seg_mm < 320.0f ||
-                           (s_seg_mm >= 580.0f && s_seg_mm < 860.0f) ||
-                           s_seg_mm >= 1220.0f)
-                              ? TRACK_SQ_SPEED
-                              : TRACK_BASE_SPEED;
+      float oct_corner_spd = (TRACK_ZIGZAG_SPEED < TRACK_SQ_SPEED)
+                                 ? TRACK_ZIGZAG_SPEED
+                                 : TRACK_SQ_SPEED;
+      float oct_app_spd = (s_seg_mm >= 1360.0f && s_seg_mm < 1700.0f)
+                              ? oct_corner_spd
+                              : ((s_seg_mm < 380.0f ||
+                                  (s_seg_mm >= 580.0f && s_seg_mm < 930.0f) ||
+                                  s_seg_mm >= 1220.0f)
+                                     ? TRACK_SQ_SPEED
+                                     : TRACK_BASE_SPEED);
       follow_line_pid(&scan, 0, oct_app_spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 1350.0f && is_crossroad(&scan)) ? 1U : 0U, 2U)) {
+      if (debounce_cond((s_seg_mm >= 1660.0f && is_crossroad(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
         enter_state(TRK_OCT_IN);
       }
@@ -952,13 +1053,22 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       if (s_seg_mm >= NAV_CROSS_PASS_MM) enter_state(TRK_OCT_LOOP);
       break;
 
-    case TRK_OCT_LOOP:
-      follow_line_pid(&scan, 0, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 1550.0f && is_crossroad(&scan)) ? 1U : 0U, 2U)) {
+    case TRK_OCT_LOOP: {
+      float oct_exit_corner_spd = (TRACK_ZIGZAG_SPEED < TRACK_HEX_SPEED)
+                                      ? TRACK_ZIGZAG_SPEED
+                                      : TRACK_HEX_SPEED;
+      float oct_spd = (s_seg_mm >= 1950.0f && s_seg_mm < 2250.0f)
+                          ? oct_exit_corner_spd
+                          : TRACK_HEX_SPEED;
+      follow_line_pid(&scan, 0, oct_spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      if (debounce_cond((s_seg_mm >= 2180.0f &&
+                         (!s_gyro_ok || fabsf(s_yaw_seg) >= 225.0f) &&
+                         is_crossroad(&scan)) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
         enter_state(TRK_OCT_OUT);
       }
       break;
+    }
 
     case TRK_OCT_OUT:
       follow_yaw_hold(s_yaw_ref, TRACK_CROSS_SPEED, out_l, out_r);
@@ -968,18 +1078,23 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
     /* 6. 前往并跨越顶部断路区域（650 mm 且目标线偏北/右前方 ~130 mm） */
     case TRK_APPROACH_BROKEN:
       if (s_seg_mm >= 850.0f && scan.cluster_count == 0U) {
-        if (s_broken_miss_cnt == 0U) {
+        if (s_broken_miss_ms == 0U) {
           s_yaw_west = s_yaw_deg;
           s_yaw_ref = s_yaw_west;
         }
-        ++s_broken_miss_cnt;
+        s_broken_miss_ms = accumulate_ms(s_broken_miss_ms, dt_s * 1000.0f, NAV_BROKEN_MISS_MS);
         follow_yaw_hold(s_yaw_west, TRACK_BROKEN_SPEED, out_l, out_r);
-        if (s_broken_miss_cnt >= 3U) {
+        if (s_broken_miss_ms >= NAV_BROKEN_MISS_MS) {
           enter_state(TRK_BROKEN_CLEAR);
         }
       } else {
-        float approach_spd = (s_seg_mm < 720.0f) ? TRACK_HEX_SPEED : TRACK_BROKEN_SPEED;
-        s_broken_miss_cnt = 0U;
+        float corner_spd = (TRACK_ZIGZAG_SPEED < TRACK_BROKEN_SPEED)
+                               ? TRACK_ZIGZAG_SPEED
+                               : TRACK_BROKEN_SPEED;
+        float approach_spd = (s_seg_mm < 120.0f)
+                                 ? TRACK_HEX_SPEED
+                                 : ((s_seg_mm < 720.0f) ? corner_spd : TRACK_BROKEN_SPEED);
+        s_broken_miss_ms = 0U;
         follow_line_pid(&scan, 0, approach_spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       }
       break;
@@ -1024,11 +1139,15 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     /* 7. 左上 500 折角南下 -> 250x250 T 型方框（穿十字下探 -> 逆时针绕完整四边 -> 向西出至 350 方框） */
     case TRK_TL_SQ_PRE_T1: {
-      float spd = (s_seg_mm >= 280.0f) ? TRACK_HEX_SPEED : TRACK_BASE_SPEED;
+      float corner_spd = (TRACK_ZIGZAG_SPEED < TRACK_HEX_SPEED)
+                             ? TRACK_ZIGZAG_SPEED
+                             : TRACK_HEX_SPEED;
+      float spd = (s_seg_mm >= 220.0f) ? corner_spd : TRACK_BASE_SPEED;
       follow_line_pid(&scan, 0, spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (scan.cluster_count == 1U && s_seg_mm >= 40.0f && s_seg_mm < 280.0f &&
-          fabsf(s_prev_err) <= 2.5f) {
-        /* 沿左上直道时刷新西向基准航向，过折角转南前停止刷新 */
+      if (scan.cluster_count == 1U && s_seg_mm >= 40.0f && s_seg_mm < 200.0f &&
+          fabsf(s_prev_err) <= 2.5f &&
+          (!s_gyro_ok || fabsf(s_yaw_deg - s_yaw_west) <= 30.0f)) {
+        /* 沿左上直道且尚未入折角时刷新西向基准航向，进入 200 mm 转角判定区前锁定基准 */
         s_yaw_west = s_yaw_deg;
       }
       if ((s_seg_mm >= 200.0f && s_gyro_ok && (s_yaw_deg - s_yaw_west) <= -65.0f &&
@@ -1080,7 +1199,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     case TRK_TL_SQ_TO_BL2:
       follow_line_pid(&scan, 0, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
-      if (debounce_cond((s_seg_mm >= 60.0f &&
+      if (debounce_cond((s_seg_mm >= 20.0f &&
                          (is_crossroad(&scan) || is_hex_junction(&scan))) ? 1U : 0U, 2U)) {
         s_yaw_ref = s_yaw_deg;
         enter_state(TRK_TL_SQ_EXIT_W);
@@ -1273,14 +1392,17 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
           s_yaw_hex300 = (s_yaw_deg - s_yaw_seg) - 210.0f;
           s_yaw_hex300_valid = 1U;
         }
-        if (scan.cluster_count <= 1U && s_seg_mm >= 1380.0f &&
+        if (scan.cluster_count == 1U && s_seg_mm >= 1380.0f &&
             (!s_gyro_ok || fabsf(rel_yaw) <= 12.0f)) {
           /* 兜底：已单线走足 1380 mm 且回正到 530 东向，直接进 ZIGZAG_2 */
           enter_state(TRK_ZIGZAG_2);
         } else {
-          /* 兜底：已偏转接近 530/SE 分叉，直接切入右咬保护段防重入第二圈 */
+          /* 兜底进 HEX_300_EXIT：仅已逼近底顶点 (rel_yaw<=12°) 或无陀螺仪才跳过前段左咬 */
+          uint8_t late_trigger = (!s_gyro_ok || rel_yaw <= 12.0f) ? 1U : 0U;
           enter_state(TRK_HEX_300_EXIT);
-          s_seg_mm = 70.0f;
+          if (late_trigger) {
+            s_seg_mm = 70.0f;
+          }
         }
       }
       break;
@@ -1301,7 +1423,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       }
       follow_line_pid(&scan, exit_pick, TRACK_HEX_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (s_seg_mm >= 200.0f &&
-          (scan.cluster_count <= 1U || s_seg_mm >= 260.0f) &&
+          (scan.cluster_count == 1U || s_seg_mm >= 260.0f) &&
           (!s_gyro_ok || !s_yaw_hex300_valid || fabsf(rel_yaw) <= 18.0f || s_seg_mm >= 260.0f)) {
         enter_state(TRK_ZIGZAG_2);
       }
@@ -1310,17 +1432,18 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
 
     /* 11. 收尾：530+550+240 + 3峰锯齿 + 490 回发车区双横线停车 */
     case TRK_ZIGZAG_2: {
-      uint8_t in_zig = (s_seg_mm >= 1150.0f && s_seg_mm <= 2250.0f) ? 1U : 0U;
-      float zig2_spd = (s_seg_mm >= 850.0f && s_seg_mm <= 2250.0f)
+      uint8_t in_zig = (s_seg_mm >= 1150.0f && s_seg_mm <= 2550.0f) ? 1U : 0U;
+      float zig2_spd = (s_seg_mm >= 850.0f && s_seg_mm <= 2550.0f)
                            ? TRACK_ZIGZAG_SPEED
-                           : ((s_seg_mm >= 280.0f && s_seg_mm <= 560.0f)
+                           : (((s_seg_mm >= 280.0f && s_seg_mm <= 560.0f) ||
+                               (s_seg_mm >= 2850.0f && s_seg_mm <= 3150.0f))
                                   ? TRACK_SQ_SPEED
                                   : TRACK_BASE_SPEED);
       follow_line_pid(&scan, 0,
                       zig2_spd,
                       in_zig ? NAV_FOLLOW_ZIG_RATE_DPS : NAV_FOLLOW_MAX_RATE_DPS,
                       dt_s, out_l, out_r);
-      if (s_seg_mm >= 2450.0f) enter_state(TRK_FINISH_ARMED);
+      if (s_seg_mm >= 3180.0f) enter_state(TRK_FINISH_ARMED);
       break;
     }
 
@@ -1350,10 +1473,12 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
         } else {
           s_finish_active_ms = 0U;
         }
-        if (hit_bar2 || (s_lap < NAV_TARGET_LAPS && s_seg_mm >= NAV_FINISH_LAP1_BYPASS_MM)) {
+        if (hit_bar2 ||
+            (s_lap < NAV_TARGET_LAPS && s_seg_mm >= NAV_FINISH_LAP1_BYPASS_MM) ||
+            (s_lap >= NAV_TARGET_LAPS && s_seg_mm >= NAV_FINISH_LAP2_STOP_MM)) {
           if (s_lap < NAV_TARGET_LAPS) {
             float lap2_seg = hit_bar2 ? NAV_LAP2_START_SEG_MM
-                                      : (NAV_LAP2_START_SEG_MM + 170.0f);
+                                      : (NAV_LAP2_START_SEG_MM + 140.0f);
             ++s_lap;
             enter_state(TRK_START_CLEAR);
             s_seg_mm = lap2_seg;

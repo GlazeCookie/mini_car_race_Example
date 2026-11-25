@@ -8,16 +8,16 @@
 #define TRACK_RIGHT_COUNTS_PER_METER 37188.0f
 
 /* 赛道巡线与竞速参数（实车支持双向调速与反接制动） */
-#define TRACK_BASE_SPEED           75500.0f  /* 常规/直道巡线目标轮速 (counts/s, ≈1.74 m/s) */
-#define TRACK_ZIGZAG_SPEED         53118.0f  /* 锯齿急弯段目标轮速 (counts/s, ≈1.26 m/s) */
-#define TRACK_SQ_SPEED             58923.0f  /* 左侧 250×250 方框绕圈目标轮速 (counts/s, ≈1.45 m/s) */
-#define TRACK_HEX_SPEED            61072.0f  /* 六边形/八边形/紧方框环岛速度 (counts/s, ≈1.05 m/s) */
-#define TRACK_HEX_R_SPEED          61725.0f  /* 右中 200 六边形速度 (counts/s, ≈0.88 m/s) */
-#define TRACK_CROSS_SPEED          55018.0f  /* 过十字/T口直行速度 (counts/s, ≈1.18 m/s) */
-#define TRACK_BROKEN_SPEED         56782.0f  /* 过断路区域盲走速度 (counts/s, ≈1.50 m/s) */
-#define TRACK_TURN_OUTER_SPEED     33800.0f  /* 无陀螺仪兜底时定角转向外轮速度 (counts/s, ≈0.91 m/s) */
-#define TRACK_TURN_INNER_REV_SPEED 18200.0f  /* 无陀螺仪兜底时定角转向内轮反转速度 (counts/s, ≈0.49 m/s) */
-#define TRACK_MAX_SPEED            97500.0f  /* 正向最高目标速度 (counts/s, ≈2.62 m/s) */
+#define TRACK_BASE_SPEED           110000.0f  /* 常规/直道巡线目标轮速 (counts/s, ≈2.37 m/s) */
+#define TRACK_ZIGZAG_SPEED         67000.0f  /* 锯齿急弯段目标轮速 (counts/s, ≈1.43 m/s) */
+#define TRACK_SQ_SPEED             75500.0f  /* 左侧 250×250 方框绕圈目标轮速 (counts/s, ≈1.74 m/s) */
+#define TRACK_HEX_SPEED            75000.0f  /* 六边形/八边形/紧方框环岛速度 (counts/s, ≈1.77 m/s) */
+#define TRACK_HEX_R_SPEED          75500.0f  /* 右中 200 六边形速度 (counts/s, ≈1.66 m/s) */
+#define TRACK_CROSS_SPEED          75000.0f  /* 过十字/T口直行速度 (counts/s, ≈1.74 m/s) */
+#define TRACK_BROKEN_SPEED         67500.0f  /* 过断路区域盲走速度 (counts/s, ≈1.58 m/s) */
+#define TRACK_TURN_OUTER_SPEED     34000.0f  /* 无陀螺仪兜底时定角转向外轮速度 (counts/s, ≈0.91 m/s) */
+#define TRACK_TURN_INNER_REV_SPEED 18000.0f  /* 无陀螺仪兜底时定角转向内轮反转速度 (counts/s, ≈0.49 m/s) */
+#define TRACK_MAX_SPEED            140000.0f  /* 正向最高目标速度 (counts/s, ≈2.82 m/s) */
 #define TRACK_MAX_REV_SPEED        52000.0f  /* 反向差速/反接制动最高速度幅值 (counts/s, ≈1.40 m/s) */
 
 /* 12 路光电管单簇信息 */

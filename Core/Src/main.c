@@ -37,7 +37,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define IF_start_Brushless_motor 1 //是否启动无刷电机，1为启动，0为不启动
-#define ENCODER_TEST_MODE 4 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹；7: 仅负压电机转动 */
+#define ENCODER_TEST_MODE 5 /* 0: 基础循迹；1: 编码器；2: 基础遥测；3: 赛道+PID Helper；4: 赛道比赛；5: 赛道非阻塞诊断；6: 纯基础循迹；7: 仅负压电机转动 */
 #define ENCODER_TEST_PERIOD_MS 200U
 #define LINE_TELEMETRY_PERIOD_MS 100U
 #if ENCODER_TEST_MODE < 0 || ENCODER_TEST_MODE > 7
@@ -55,7 +55,7 @@
 /* 循迹和速度参数均需根据电机、编码器和赛道实车标定。 */
 #define LINE_ACTIVE_LEVEL  1U /* 白线输出高电平 */
 #define LINE_MAX_ACTIVE    12U
-#define LINE_PERIOD_US     2000U /* 控制周期 2 ms (500 Hz)，基于 DWT->CYCCNT 精确触发 */
+#define LINE_PERIOD_US     1000U /* 控制周期 1 ms (1000 Hz)，基于 DWT->CYCCNT 精确触发 */
 #define LINE_KP            1100.0f /* 基础循迹位置环比例系数 */
 #define LINE_KP2           110.0f  /* 基础循迹大偏差二次项 */
 #define LINE_KD            1.30f   /* 基础循迹微分项（按 dt_s 归一化） */
