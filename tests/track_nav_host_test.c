@@ -317,7 +317,12 @@ static void test_square_and_hex_r_transitions(void) {
   mock_line = 0xFE0;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_APPROACH_OCT && s_corner_latch_ms == 0U);
 
-  /* 右中六边形：单灯坏点假双簇 0x005 (间隔仅 1 路暗管) 不得误触发出环；320mm 双簇 0x1CF 在 830mm, s_yaw_seg=-265° 可稳定切出；若偏晚触发 (s_yaw_seg<=-315°) 自动跳过左咬直接右避让 */
+  /* 右中六边形：720 mm 后临近出口自动降至 NAV_HEX_R_EXIT_SPEED，且丢线采用低前速 NAV_SEARCH_FWD_SPEED 防飞出 320/420 分叉；单灯坏点假双簇 0x005 (间隔仅 1 路暗管) 不得误触发出环；320mm 双簇 0x1CF 在 830mm, s_yaw_seg=-265° 可稳定切出；若偏晚触发 (s_yaw_seg<=-315°) 自动跳过左咬直接右避让 */
+  setup(TRK_HEX_R_LOOP); s_seg_mm = 750.0f; mock_line = 0x060;
+  assert(step(0, 0, &l, &r) == 0U && fabsf(0.5f * (l + r) - NAV_HEX_R_EXIT_SPEED) < 1.0f);
+  mock_line = 0x000;
+  assert(step(0, 0, &l, &r) == 0U && s_search_active && s_search_fwd_spd == NAV_SEARCH_FWD_SPEED);
+
   setup(TRK_HEX_R_LOOP); s_yaw_ref = 170.0f; s_seg_mm = 830.0f; s_yaw_seg = -265.0f; s_yaw_deg = -140.0f;
   mock_line = 0x005;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_HEX_R_LOOP);
@@ -555,7 +560,7 @@ static void test_finish(void) {
   setup(TRK_FINISH_BAR1); s_lap = 2U; s_finish_released = 1U; s_seg_mm = 600.0f; mock_line = 0x060;
   assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1 && s_lap == 2U);
   s_seg_mm = 680.0f;
-  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_DONE);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE);
 
   /* 第 2 圈（停车圈）碾过第一条终点横线 (0x7FE) 进入 BAR1 后减速 30%（TRACK_BASE_SPEED * 0.70f），碾过第二条线 0xFFF 才完赛刹车停车 */
   setup(TRK_FINISH_ARMED); s_lap = 2U;
@@ -569,33 +574,40 @@ static void test_finish(void) {
          fabsf(r - 0.70f * TRACK_BASE_SPEED) < 1e-1f);
   s_seg_mm = 340.0f;
   mock_line = 0xFFF;
-  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
-  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f);
-  for (int i = 0; i < 2; ++i) assert(step(0, 0, &l, &r) == 0U && s_state == TRK_DONE);
-  assert(step(0, 0, &l, &r) == 1U && s_state == TRK_DONE && l == 0 && r == 0);
+  TrackState next_after_brake = NAV_BLINDBOX_ENABLE
+                                    ? ((NAV_BLINDBOX_WAIT_MS > 0U) ? TRK_BLINDBOX_WAIT : TRK_BLINDBOX_SPIN)
+                                    : TRK_DONE;
 
-  /* 带速度踩到第 2 圈第二条终点横线时：高速阶段反接制动 -> 瞬时抱死/量化低速不提前断电 -> 回弹/重新滚快仍继续锁停或反接 -> 连续 4 帧停稳后彻底断电 (1U) */
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
+  assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE && l == 0.0f && r == 0.0f);
+  for (int i = 0; i < 2; ++i) assert(step(0, 0, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE);
+  assert(step(0, 0, &l, &r) == 1U && s_state == next_after_brake &&
+         l == 0.0f && r == 0.0f && fabsf(s_yaw_ref - s_yaw_deg) < 1e-2f);
+
+  /* 带速度踩到第 2 圈第二条终点横线时：高速阶段反接制动 -> 瞬时抱死/量化低速不提前断电 -> 回弹/重新滚快仍继续锁停或反接 -> 连续 4 帧停稳后直接进盲盒/完赛锁定 (1U) */
   setup(TRK_FINISH_BAR1); s_lap = 2U; s_finish_released = 1U; s_seg_mm = 340.0f; mock_line = 0xFFF;
   assert(step(36, 36, &l, &r) == 0U && s_state == TRK_FINISH_BAR1);
-  assert(step(36, 36, &l, &r) == 0U && s_state == TRK_DONE &&
+  assert(step(36, 36, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE &&
          l == -NAV_FINISH_BRAKE_REV_SPEED && r == -NAV_FINISH_BRAKE_REV_SPEED);
-  assert(step(3, 3, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f && s_finish_stop_ms == 0U);
-  assert(step(1, 1, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f && !s_finish_brake_done);
-  assert(step(1, 1, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f && !s_finish_brake_done);
-  assert(step(10, 10, &l, &r) == 0U && s_state == TRK_DONE &&
+  assert(step(3, 3, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE && l == 0.0f && r == 0.0f && s_finish_stop_ms == 0U);
+  assert(step(1, 1, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE && l == 0.0f && r == 0.0f && !s_finish_brake_done);
+  assert(step(1, 1, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE && l == 0.0f && r == 0.0f && !s_finish_brake_done);
+  assert(step(10, 10, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE &&
          l == -NAV_FINISH_BRAKE_REV_SPEED && r == -NAV_FINISH_BRAKE_REV_SPEED && s_finish_stop_ms == 0U);
-  assert(step(-5, -5, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f && s_finish_stop_ms == 0U);
+  assert(step(-5, -5, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE && l == 0.0f && r == 0.0f && s_finish_stop_ms == 0U);
   for (int i = 0; i < 3; ++i) {
-    assert(step(1, 1, &l, &r) == 0U && s_state == TRK_DONE && l == 0.0f && r == 0.0f && !s_finish_brake_done);
+    assert(step(1, 1, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE && l == 0.0f && r == 0.0f && !s_finish_brake_done);
   }
-  assert(step(1, 1, &l, &r) == 1U && s_state == TRK_DONE && l == 0.0f && r == 0.0f && s_finish_brake_done == 1U);
+  assert(step(1, 1, &l, &r) == 1U && s_state == next_after_brake &&
+         l == 0.0f && r == 0.0f && fabsf(s_yaw_ref - s_yaw_deg) < 1e-2f);
 
-  /* 主动制动超时兜底（如架空或编码器未完全归零）不超过 NAV_FINISH_BRAKE_MAX_MS 必定断电 */
-  setup(TRK_DONE);
+  /* 主动制动超时兜底（如架空或编码器未完全归零）不超过 NAV_FINISH_BRAKE_MAX_MS 必定结束制动 */
+  setup(TRK_FINISH_BRAKE);
   for (int i = 0; i < (int)(NAV_FINISH_BRAKE_MAX_MS / 2U) - 1; ++i) {
-    assert(step(36, 36, &l, &r) == 0U);
+    assert(step(36, 36, &l, &r) == 0U && s_state == TRK_FINISH_BRAKE);
   }
-  assert(step(36, 36, &l, &r) == 1U && l == 0.0f && r == 0.0f);
+  assert(step(36, 36, &l, &r) == 1U && s_state == next_after_brake &&
+         l == 0.0f && r == 0.0f && fabsf(s_yaw_ref - s_yaw_deg) < 1e-2f);
 }
 
 static void test_search_never_stops(void) {
@@ -714,7 +726,12 @@ static void test_double_hex_corner_response(void) {
     assert((left - right) * turn_dir > 2.0f * initial_diff);
     mock_line = 0U;
     step_1ms(0, 0, &left, &right);
-    assert(s_search_active && s_search_dir == turn_dir);
+    assert(s_search_active && s_search_dir == turn_dir &&
+           s_search_fwd_spd == NAV_HEX_SEARCH_FWD_SPEED);
+    mock_line = (turn_dir > 0) ? 0x001 : 0x800;
+    step_1ms(0, 0, &left, &right);
+    assert(!s_search_active && s_recapture_ms == NAV_HEX_RECAPTURE_MS &&
+           0.5f * (left + right) >= 35000.0f);
   }
 }
 
@@ -815,6 +832,93 @@ static void test_1ms_control_rate(void) {
   assert(step_1ms(0, 0, &l, &r) == 0U && s_recapture_ms == 0U);
 }
 
+static void test_blindbox(void) {
+  float l, r;
+
+  /* 1. WAIT：静止等待满 NAV_BLINDBOX_WAIT_MS (500 ms) 后切入 SPIN 并锁存航向；中途轮速未稳则清零重计 */
+  setup(TRK_BLINDBOX_WAIT); s_yaw_deg = 725.0f;
+  for (uint16_t i = 0U; i < 200U; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_BLINDBOX_WAIT && l == 0.0f && r == 0.0f);
+  }
+  assert(s_blindbox_ms == 200U);
+  assert(step_1ms(5, 5, &l, &r) == 1U && s_state == TRK_BLINDBOX_WAIT &&
+         s_blindbox_ms == 0U && l == 0.0f && r == 0.0f);
+  for (uint16_t i = 0U; i + 1U < NAV_BLINDBOX_WAIT_MS; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_BLINDBOX_WAIT && l == 0.0f && r == 0.0f);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_BLINDBOX_SPIN &&
+         fabsf(s_yaw_ref - 725.0f) < 1e-2f && l == 0.0f && r == 0.0f);
+
+  /* 2. SPIN：陀螺仪闭环对称原地顺时针自旋 180°，停稳保持 80 ms 后切入 SEEK 并把 s_yaw_ref 更新为 +180° */
+  setup(TRK_BLINDBOX_SPIN); s_yaw_ref = 10.0f; s_yaw_deg = 10.0f;
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SPIN &&
+         l > 0.0f && r < 0.0f && fabsf(l + r) < 1e-1f);
+  s_yaw_deg = 190.0f; mock_gyro = 0; s_rate_lpf = 0.0f;
+  for (int i = 0; i < 79; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SPIN);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SEEK &&
+         fabsf(s_yaw_ref - 190.0f) < 1e-2f && l == 0.0f && r == 0.0f);
+
+  /* 无陀螺仪降级：编码器差动旋满 NAV_BLINDBOX_NO_GYRO_SPIN_MM 进入 SEEK */
+  setup(TRK_BLINDBOX_SPIN); s_gyro_ok = 0U;
+  for (int i = 0; i < 14; ++i) {
+    assert(step(500, -500, &l, &r) == 0U);
+  }
+  assert(s_state == TRK_BLINDBOX_SEEK);
+
+  /* 3. SEEK：低速巡线不触发 90° 直角锁存；丢线不触发高速赛中扫线而保持锁航向缓进；连续 3 ms 横线进 SETTLE；超距兜底 TRK_DONE */
+  setup(TRK_BLINDBOX_SEEK); s_yaw_ref = 190.0f; s_yaw_deg = 190.0f;
+  mock_line = 0x060;
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SEEK &&
+         fabsf(0.5f * (l + r) - NAV_BLINDBOX_CREEP_SPEED) < 1e-1f);
+  mock_line = 0x0FF;
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SEEK && s_corner_latch_ms == 0U);
+  mock_line = 0x000;
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SEEK && !s_search_active);
+  mock_line = 0xFFF;
+  for (int i = 0; i < 2; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SEEK);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SETTLE && l == 0.0f && r == 0.0f);
+
+  setup(TRK_BLINDBOX_SEEK); s_seg_mm = NAV_BLINDBOX_SEEK_MAX_MM; mock_line = 0x060;
+  assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_DONE && l == 0.0f && r == 0.0f);
+
+  /* 4. SETTLE & NUDGE：停稳恰好在边沿白线上 -> TRK_DONE (1U) */
+  setup(TRK_BLINDBOX_SETTLE); mock_line = 0xFFF;
+  for (int i = 0; i < 119; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SETTLE);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_DONE && l == 0.0f && r == 0.0f);
+
+  /* 刹停微过冲 (0x060) -> 温和倒退微调 (NUDGE, l<0, r<0) 回到白线 (0xFFF) -> SETTLE 稳停在白线上 -> TRK_DONE (1U) */
+  setup(TRK_BLINDBOX_SETTLE); s_yaw_ref = 190.0f; s_yaw_deg = 190.0f; mock_line = 0x060;
+  for (int i = 0; i < 119; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SETTLE);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_BLINDBOX_NUDGE &&
+         s_blindbox_retry == 1U && l == 0.0f && r == 0.0f);
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_NUDGE &&
+         l < 0.0f && r < 0.0f);
+  mock_line = 0xFFF;
+  for (int i = 0; i < 2; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_NUDGE);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SETTLE && l == 0.0f && r == 0.0f);
+  for (int i = 0; i < 119; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SETTLE);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_DONE && l == 0.0f && r == 0.0f);
+
+  /* 微调次数耗尽兜底停机 */
+  setup(TRK_BLINDBOX_SETTLE); s_blindbox_retry = NAV_BLINDBOX_MAX_RETRIES; mock_line = 0x060;
+  for (int i = 0; i < 119; ++i) {
+    assert(step_1ms(0, 0, &l, &r) == 0U && s_state == TRK_BLINDBOX_SETTLE);
+  }
+  assert(step_1ms(0, 0, &l, &r) == 1U && s_state == TRK_DONE && l == 0.0f && r == 0.0f);
+}
+
 int main(void) {
   test_calibration_and_resilience();
   test_gap();
@@ -826,6 +930,7 @@ int main(void) {
   test_double_hex_corner_response();
   test_corner_latch_and_in_place_search();
   test_1ms_control_rate();
+  test_blindbox();
   puts("track navigation host tests: OK");
   return 0;
 }

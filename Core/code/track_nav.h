@@ -18,7 +18,8 @@
 #define TRACK_TURN_OUTER_SPEED     34000.0f  /* 无陀螺仪兜底时定角转向外轮速度 (counts/s, ≈0.91 m/s) */
 #define TRACK_TURN_INNER_REV_SPEED 18000.0f  /* 无陀螺仪兜底时定角转向内轮反转速度 (counts/s, ≈0.49 m/s) */
 #define TRACK_MAX_SPEED            140000.0f  /* 正向最高目标速度 (counts/s, ≈2.82 m/s) */
-#define TRACK_MAX_REV_SPEED        52000.0f  /* 反向差速/反接制动最高速度幅值 (counts/s, ≈1.40 m/s) */
+#define TRACK_MAX_REV_SPEED        52000.0f   /* 反向差速/反接制动最高速度幅值 (counts/s, ≈1.40 m/s) */
+#define NAV_BLINDBOX_ENABLE        1U         /* 1: 完赛停稳 1 秒后执行盲盒(自旋 180° + 压发车区边沿白线停止); 0: 仅完赛停车 */
 
 /* 12 路光电管单簇信息 */
 typedef struct {
@@ -89,7 +90,13 @@ typedef enum {
   TRK_ZIGZAG_2,            /* 530+550+240+3峰锯齿+490 回发车区 */
   TRK_FINISH_ARMED,        /* 进入底部发车区等待第一条终点横线 */
   TRK_FINISH_BAR1,         /* 越过第一条横线等待第二条横线 */
-  TRK_DONE,                /* 完赛停车锁定 */
+  TRK_FINISH_BRAKE,        /* 完赛踩过第二条横线后主动刹停 */
+  TRK_BLINDBOX_WAIT,       /* 盲盒阶段1：发车区完全停稳后静止等待 1 秒 */
+  TRK_BLINDBOX_SPIN,       /* 盲盒阶段2：原地平稳自旋 180° */
+  TRK_BLINDBOX_SEEK,       /* 盲盒阶段3：低速循迹前移寻找发车区边沿白线 */
+  TRK_BLINDBOX_SETTLE,     /* 盲盒阶段4：压线刹停并闭环校验光电管是否在白线上 */
+  TRK_BLINDBOX_NUDGE,      /* 盲盒阶段5：若刹停微过冲则超低速倒退/微调回到白线上 */
+  TRK_DONE,                /* 完赛与盲盒任务全部完成，永久停车锁定 */
   TRK_FAULT_STOP           /* 陀螺仪或异常保护停车 */
 } TrackState;
 

@@ -22,7 +22,7 @@
 #define NAV_LINE_RATE_KP2        4.5f     /* 位置外环大偏差二次项 (°/s per err^2) */
 #define NAV_LINE_RATE_KD         0.050f   /* 位置外环微分超前 (°/s per (err/s)) */
 #define NAV_LINE_RATE_KD_LIM     140.0f   /* 位置外环微分限幅 (°/s)，提升入弯甩尾与出弯制动 */
-#define NAV_DOUBLE_HEX_ERR_TAU_S 0.004f   /* 双环岛环内位置反馈的一阶滤波时间常数（秒） */
+#define NAV_DOUBLE_HEX_ERR_TAU_S 0.002f   /* 双环岛环内位置反馈的一阶滤波时间常数（秒） */
 #define NAV_FOLLOW_MAX_REV_SPEED 26000.0f /* 正常巡线内轮允许最大反转速度 (counts/s, ≈0.70 m/s)，强化急弯甩尾 */
 #define NAV_CORNER_MAX_REV_SPEED 38000.0f /* 单侧 90° 直角折角内轮反甩上限 (counts/s, ≈1.02 m/s) */
 #define NAV_FOLLOW_MAX_RATE_DPS  495.0f   /* 正常弯道巡线目标角速度上限 (°/s) */
@@ -43,9 +43,13 @@
 #define NAV_CORNER_SEARCH_RATE_DPS   594.0f   /* 90° 折角/方框原地纯旋转寻线角速度上限 (°/s) */
 #define NAV_SEARCH_MIN_RATE_DPS      121.0f   /* 接近边界时最小旋转角速度 (°/s) */
 #define NAV_SEARCH_FWD_SPEED         5000.0f  /* 普通/锯齿丢线微前移寻线速度 (counts/s, ≈0.13 m/s)，防尖端弯道外抛飞出 */
+#define NAV_HEX_SEARCH_FWD_SPEED     28000.0f /* 六边形/八边形 45°~60° 环岛短暂丢线带速切弯前速 (counts/s)，消除急刹卡顿 */
 #define NAV_SEARCH_SWEEP_MS          1500U    /* 兜底超时：超时仍未找到则向对称边界回扫 */
 #define NAV_RECAPTURE_MS             65U      /* 重新抓到线后的短稳姿窗口，大外偏退线最长达 ~62 ms，回正即提前释放 */
 #define NAV_RECAPTURE_SPEED          48000.0f /* 抓线瞬间限速 (counts/s, ≈1.29 m/s)，防重抓外侧灯珠后冲出 */
+#define NAV_HEX_RECAPTURE_MS         25U      /* 环岛短丢线重抓后的轻稳姿窗口，避免 65 ms 低速死锁 */
+#define NAV_HEX_RECAPTURE_SPEED      62000.0f /* 环岛重抓窗口内的目标速度上限 (counts/s) */
+#define NAV_HEX_R_EXIT_SPEED         (TRACK_HEX_R_SPEED * 0.85f) /* 右中 200 六边形临近出口及出环选线降速上限 */
 #define NAV_RECAPTURE_MAX_RATE       495.0f   /* 抓线窗口内目标角速度上限 (°/s) */
 #define NAV_YAW_HOLD_KP          260.0f   /* 锁航向直行纠偏增益 (counts/s per deg) */
 
@@ -73,6 +77,32 @@
 #define NAV_FINISH_STOP_HOLD_MS      8U       /* 双轮需连续保持停稳带 8 ms (4 帧) 才切断电机，防量化/打滑误松刹 */
 #define NAV_FINISH_BRAKE_MAX_MS      220U     /* 主动制动保护超时 */
 
+/* 软件盲盒参数（完赛完全停稳 0.5 秒后：原地 180° 自旋 -> 慢速压发车区边沿白线 -> 闭环校验停稳） */
+#define NAV_BLINDBOX_WAIT_MS            500U    /* 完全停稳后静止等待 0.5 s 再进入盲盒自旋 (ms) */
+#define NAV_BLINDBOX_SPIN_DEG           180.0f  /* 原地顺时针自旋目标角度 (°) */
+#define NAV_BLINDBOX_SPIN_KP            4.5f    /* 自旋角度外环比例 (°/s per deg) */
+#define NAV_BLINDBOX_SPIN_MAX_RATE_DPS  180.0f  /* 自旋最大角速度 (°/s)，低速求稳 */
+#define NAV_BLINDBOX_SPIN_MIN_RATE_DPS  35.0f   /* 角度误差 > 2.5° 时的最小克服静摩擦角速度 (°/s) */
+#define NAV_BLINDBOX_SPIN_MAX_WHEEL_SPD 24000.0f /* 自旋单轮最大目标轮速 (counts/s) */
+#define NAV_BLINDBOX_SPIN_TOL_DEG       3.0f    /* 自旋到位角度容差 (°) */
+#define NAV_BLINDBOX_SPIN_STOP_DPS      25.0f   /* 自旋到位角速度容差 (°/s) */
+#define NAV_BLINDBOX_SPIN_HOLD_MS       80U     /* 自旋到位稳定保持时间 (ms) */
+#define NAV_BLINDBOX_SPIN_MAX_MS        5000U   /* 自旋安全超时 (ms) */
+#define NAV_BLINDBOX_NO_GYRO_SPIN_MM    370.0f  /* 无陀螺仪兜底：双轮差动里程 π*W (mm) */
+#define NAV_BLINDBOX_NO_GYRO_WHEEL_SPD  10000.0f /* 无陀螺仪兜底自旋轮速 (counts/s) */
+#define NAV_BLINDBOX_CREEP_SPEED        10000.0f /* 找发车区边沿白线的慢速巡线轮速 (counts/s, ≈0.27 m/s) */
+#define NAV_BLINDBOX_CREEP_MAX_RATE_DPS 120.0f  /* 慢速寻边沿线时的最大转向角速度 (°/s) */
+#define NAV_BLINDBOX_SEEK_MAX_MM        750.0f  /* 寻找边沿白线的最大前移保护距离 (mm) */
+#define NAV_BLINDBOX_SEEK_MAX_MS        6000U   /* 寻找边沿白线的最大安全超时 (ms) */
+#define NAV_BLINDBOX_BRAKE_REV_SPEED    6000.0f /* 压线后温和反接制动目标轮速 (counts/s) */
+#define NAV_BLINDBOX_SETTLE_HOLD_MS     120U    /* 压线停稳后保持静止校验时间 (ms) */
+#define NAV_BLINDBOX_SETTLE_MAX_MS      600U    /* 压线刹停校验超时 (ms) */
+#define NAV_BLINDBOX_NUDGE_SPEED        6000.0f /* 过冲微调轮速 (counts/s, ≈0.16 m/s) */
+#define NAV_BLINDBOX_NUDGE_MAX_RATE_DPS 90.0f   /* 正向微调最大转向角速度 (°/s) */
+#define NAV_BLINDBOX_NUDGE_MAX_MM       120.0f  /* 单次微调最大行程保护 (mm) */
+#define NAV_BLINDBOX_NUDGE_MAX_MS       2500U   /* 单次微调最大超时 (ms) */
+#define NAV_BLINDBOX_MAX_RETRIES        3U      /* 刹停过冲最大微调次数 */
+
 typedef struct {
   float kp;
   float ki;
@@ -83,7 +113,7 @@ typedef struct {
 /* 各段按 {Kp, Ki, Kd, Kff} 设置，单段可在表中直接填写四个数。 */
 #define NAV_RATE_PID_DEFAULT { 55.0f, 220.0f, 0.0f, 49.0f }
 #define NAV_RATE_PID_ZIGZAG { 53.0f, 230.0f, 0.0f, 51.0f }
-#define NAV_RATE_PID_HEX { 50.0f, 210.0f, 0.0f, 47.0f }
+#define NAV_RATE_PID_HEX { 54.0f, 220.0f, 0.0f, 50.0f }
 #define NAV_RATE_PID_SQ { 55.0f, 220.0f, 0.0f, 54.0f }
 /* 这里列出使用角速度内环的状态。同段巡线、丢线寻线共用一行。
  * 锁航向过路口和盲走使用 follow_yaw_hold 的航向控制。 */
@@ -120,6 +150,9 @@ static const NavRatePidGains s_rate_pid_gains[] = {
   [TRK_ZIGZAG_2]          = NAV_RATE_PID_DEFAULT,
   [TRK_FINISH_ARMED]      = NAV_RATE_PID_DEFAULT,
   [TRK_FINISH_BAR1]       = NAV_RATE_PID_DEFAULT,
+  [TRK_BLINDBOX_SPIN]     = NAV_RATE_PID_DEFAULT,
+  [TRK_BLINDBOX_SEEK]     = NAV_RATE_PID_DEFAULT,
+  [TRK_BLINDBOX_NUDGE]    = NAV_RATE_PID_DEFAULT,
 };
 
 static TrackState s_state = TRK_START_CLEAR;
@@ -134,6 +167,11 @@ static uint8_t s_finish_released = 0U;
 static uint8_t s_finish_brake_done = 0U;
 static uint16_t s_finish_brake_ms = 0U;
 static uint16_t s_finish_stop_ms = 0U;
+static uint16_t s_blindbox_ms = 0U;
+static uint16_t s_blindbox_hold_ms = 0U;
+static float s_blindbox_turn_mm = 0.0f;
+static uint8_t s_blindbox_retry = 0U;
+static int8_t s_blindbox_nudge_dir = -1;
 static uint8_t s_gyro_ok = 0U;
 static uint8_t s_gyro_fail_cnt = 0U;
 static float s_gyro_bias = 0.0f;
@@ -260,6 +298,21 @@ static void enter_state(TrackState next) {
     s_finish_clear_ms = 0U;
     s_finish_released = 0U;
   }
+  if (next == TRK_BLINDBOX_SEEK || next == TRK_BLINDBOX_NUDGE) {
+    s_finish_active_ms = 0U;
+    s_search_active = 0U;
+    s_search_dir = 0;
+    s_search_phase = 0U;
+    s_lost_ms = 0U;
+    s_recapture_ms = 0U;
+  }
+  if (next == TRK_START_CLEAR || next == TRK_BLINDBOX_WAIT || next == TRK_BLINDBOX_SEEK) {
+    s_blindbox_retry = 0U;
+    s_blindbox_nudge_dir = -1;
+  }
+  s_blindbox_ms = 0U;
+  s_blindbox_hold_ms = 0U;
+  s_blindbox_turn_mm = 0.0f;
   s_finish_brake_done = 0U;
   s_finish_brake_ms = 0U;
   s_finish_stop_ms = 0U;
@@ -433,6 +486,8 @@ static uint8_t allow_90deg_corner_snap(void) {
     case TRK_HEX_200_LOOP:
     case TRK_HEX_300_L:
     case TRK_HEX_300_EXIT:
+    case TRK_BLINDBOX_SEEK:
+    case TRK_BLINDBOX_NUDGE:
       return 0U;
     case TRK_SQ_RM_LOOP:
     case TRK_LEFT_SQ2_LOOP:
@@ -446,6 +501,20 @@ static uint8_t allow_90deg_corner_snap(void) {
       return (s_seg_mm >= 200.0f) ? 1U : 0U;
     default:
       return 1U;
+  }
+}
+
+/* 六边形/八边形环岛绕行状态：短暂扫出白线时保持带速过弯，避免直角级别急刹卡顿（不含紧出口的右中 200 六边形） */
+static uint8_t is_roundabout_loop(void) {
+  switch (s_state) {
+    case TRK_OCT_LOOP:
+    case TRK_HEX_BL_LOOP:
+    case TRK_HEX_300_R:
+    case TRK_HEX_200_LOOP:
+    case TRK_HEX_300_L:
+      return 1U;
+    default:
+      return 0U;
   }
 }
 
@@ -487,7 +556,7 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
         s_search_fwd_spd = 0.0f;
       } else {
         s_search_dir = (s_last_dir != 0) ? s_last_dir : ((s_rate_lpf < 0.0f) ? -1 : 1);
-        s_search_fwd_spd = NAV_SEARCH_FWD_SPEED;
+        s_search_fwd_spd = is_roundabout_loop() ? NAV_HEX_SEARCH_FWD_SPEED : NAV_SEARCH_FWD_SPEED;
       }
       s_corner_latch_ms = 0U;
       s_corner_dir = 0;
@@ -522,7 +591,8 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
       gyro_rate_pid_reset();
       target_yaw = s_search_start_yaw + (float)s_search_dir * NAV_SEARCH_TARGET_DEG;
       rem = (target_yaw - s_yaw_deg) * (float)s_search_dir;
-      eff_search_fwd = s_search_fwd_spd;
+      s_search_fwd_spd = NAV_SEARCH_FWD_SPEED;
+      eff_search_fwd = NAV_SEARCH_FWD_SPEED;
     }
 
     if (s_gyro_ok) {
@@ -547,7 +617,7 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
     s_search_active = 0U;
     s_search_dir = 0;
     s_search_phase = 0U;
-    s_recapture_ms = NAV_RECAPTURE_MS;
+    s_recapture_ms = is_roundabout_loop() ? NAV_HEX_RECAPTURE_MS : NAV_RECAPTURE_MS;
     gyro_rate_pid_reset();
   } else if (s_recapture_ms > 0U) {
     uint16_t dec = (dt_ms > 0.0f) ? (uint16_t)(dt_ms + 0.5f) : 1U;
@@ -623,7 +693,8 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
 
   /* 明显偏离中心（>=2.0）立即更新方向；抓线稳姿前期不因单帧微越过中心就立即反翻寻线方向，防止左右摆头 */
   {
-    uint8_t settling_recapture = (s_recapture_ms > (NAV_RECAPTURE_MS / 2U)) ? 1U : 0U;
+    uint16_t recap_half = (is_roundabout_loop() ? NAV_HEX_RECAPTURE_MS : NAV_RECAPTURE_MS) / 2U;
+    uint8_t settling_recapture = (s_recapture_ms > recap_half) ? 1U : 0U;
     float pos_thresh = (settling_recapture && s_last_dir < 0) ? 6.0f : 2.0f;
     float neg_thresh = (settling_recapture && s_last_dir > 0) ? 6.0f : 2.0f;
     if (err >= pos_thresh) {
@@ -670,11 +741,15 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
   }
   s_has_prev_err = 1U;
 
+  uint8_t in_roundabout = is_roundabout_loop();
+  uint16_t recap_release_at = in_roundabout
+                                  ? ((NAV_HEX_RECAPTURE_MS > 15U) ? (uint16_t)(NAV_HEX_RECAPTURE_MS - 15U) : 0U)
+                                  : (uint16_t)(NAV_RECAPTURE_MS - 20U);
   float eff_base = base_target;
   float eff_max_rate = max_rate_dps;
   float eff_max_rev = NAV_FOLLOW_MAX_REV_SPEED;
   abs_err = fabsf(err);
-  if (s_recapture_ms > 0U && s_recapture_ms <= (NAV_RECAPTURE_MS - 20U) &&
+  if (s_recapture_ms > 0U && s_recapture_ms <= recap_release_at &&
       abs_err <= 2.5f && (!s_gyro_ok || fabsf(s_rate_lpf) <= 180.0f)) {
     s_recapture_ms = 0U;
   }
@@ -685,7 +760,8 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
     eff_max_rev = NAV_CORNER_MAX_REV_SPEED;
   }
   if (s_recapture_ms > 0U) {
-    if (eff_base > NAV_RECAPTURE_SPEED) eff_base = NAV_RECAPTURE_SPEED;
+    float recap_cap = in_roundabout ? NAV_HEX_RECAPTURE_SPEED : NAV_RECAPTURE_SPEED;
+    if (eff_base > recap_cap) eff_base = recap_cap;
     if (eff_max_rate > NAV_RECAPTURE_MAX_RATE) eff_max_rate = NAV_RECAPTURE_MAX_RATE;
   }
 
@@ -718,9 +794,10 @@ static void follow_line_pid(const LineScanResult *scan, int8_t pick_mode,
   if (corner_active) {
     scale = clamp_f(scale, 0.34f, 0.38f);
   } else if (s_recapture_ms > 0U) {
-    scale = clamp_f(1.0f - 0.10f * (severity - 4.5f), 0.50f, 1.0f);
+    float recap_floor = in_roundabout ? 0.62f : 0.50f;
+    scale = clamp_f(1.0f - 0.10f * (severity - 4.5f), recap_floor, 1.0f);
   } else {
-    float min_scale = (abs_err >= 8.0f) ? 0.48f : 0.68f;
+    float min_scale = (abs_err >= 8.0f) ? (in_roundabout ? 0.58f : 0.48f) : 0.68f;
     scale = clamp_f(scale, min_scale, 1.0f);
   }
   base_spd = eff_base * scale;
@@ -778,6 +855,11 @@ void TrackNav_Start(void) {
   s_corner_latch_ms = 0U;
   s_corner_override_prev = 0U;
   s_search_fwd_spd = NAV_SEARCH_FWD_SPEED;
+  s_blindbox_ms = 0U;
+  s_blindbox_hold_ms = 0U;
+  s_blindbox_turn_mm = 0.0f;
+  s_blindbox_retry = 0U;
+  s_blindbox_nudge_dir = -1;
   gyro_rate_pid_reset();
   s_fault = TRACK_FAULT_NONE;
   s_fault_state = TRK_START_CLEAR;
@@ -868,11 +950,8 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
   *out_l = 0.0f;
   *out_r = 0.0f;
 
-  if (s_state == TRK_FAULT_STOP) {
+  if (s_state == TRK_FAULT_STOP || s_state == TRK_DONE) {
     return 1U;
-  }
-  if (s_state == TRK_DONE) {
-    return finish_active_brake_step(left_spd, right_spd, dt_s, out_l, out_r);
   }
 
   if (s_gyro_ok) {
@@ -983,7 +1062,8 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
                            s_seg_mm >= 850.0f &&
                            (s_gyro_ok ? (s_yaw_seg <= -275.0f)
                                       : (s_seg_mm >= 920.0f)));
-      follow_line_pid(&scan, 0, TRACK_HEX_R_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      float loop_spd = (s_seg_mm >= 720.0f) ? NAV_HEX_R_EXIT_SPEED : TRACK_HEX_R_SPEED;
+      follow_line_pid(&scan, 0, loop_spd, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (debounce_cond(exit_fork ? 1U : 0U, 2U)) {
         uint8_t late_trigger = (s_gyro_ok && s_yaw_seg <= -315.0f) ? 1U : 0U;
         enter_state(TRK_HEX_R_EXIT);
@@ -1019,7 +1099,7 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
         /* 65~200mm 再次经过 420mm 入环分叉 (如 0xF0C/0x3B8) 时，改取最右簇/右沿直走 330，防止再次左拐入环 */
         exit_pick = 1;
       }
-      follow_line_pid(&scan, exit_pick, TRACK_HEX_R_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
+      follow_line_pid(&scan, exit_pick, NAV_HEX_R_EXIT_SPEED, NAV_FOLLOW_MAX_RATE_DPS, dt_s, out_l, out_r);
       if (s_seg_mm >= 195.0f &&
           (scan.cluster_count == 1U || s_seg_mm >= 240.0f) &&
           (!s_gyro_ok || hex_total_yaw <= -335.0f || s_seg_mm >= 240.0f)) {
@@ -1483,15 +1563,164 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
             enter_state(TRK_START_CLEAR);
             s_seg_mm = lap2_seg;
           } else {
-            enter_state(TRK_DONE);
+            enter_state(TRK_FINISH_BRAKE);
           }
         }
       }
       break;
     }
 
-    case TRK_DONE:
+    case TRK_FINISH_BRAKE:
       break;
+
+    case TRK_BLINDBOX_WAIT:
+      if (fabsf(left_spd) <= NAV_FINISH_STOP_SPEED &&
+          fabsf(right_spd) <= NAV_FINISH_STOP_SPEED) {
+        s_blindbox_ms = accumulate_ms(s_blindbox_ms, dt_s * 1000.0f, NAV_BLINDBOX_WAIT_MS);
+        if (s_blindbox_ms >= NAV_BLINDBOX_WAIT_MS) {
+          s_yaw_ref = s_yaw_deg;
+          enter_state(TRK_BLINDBOX_SPIN);
+        }
+      } else {
+        s_blindbox_ms = 0U;
+      }
+      *out_l = 0.0f;
+      *out_r = 0.0f;
+      return 1U;
+
+    case TRK_BLINDBOX_SPIN: {
+      float dt_ms = dt_s * 1000.0f;
+      s_blindbox_ms = accumulate_ms(s_blindbox_ms, dt_ms, NAV_BLINDBOX_SPIN_MAX_MS);
+      if (s_gyro_ok) {
+        float target_yaw = s_yaw_ref + NAV_BLINDBOX_SPIN_DEG;
+        float yaw_err = target_yaw - s_yaw_deg;
+        float target_rate = clamp_f(NAV_BLINDBOX_SPIN_KP * yaw_err,
+                                    -NAV_BLINDBOX_SPIN_MAX_RATE_DPS,
+                                    NAV_BLINDBOX_SPIN_MAX_RATE_DPS);
+        if (fabsf(yaw_err) > 2.5f && fabsf(target_rate) < NAV_BLINDBOX_SPIN_MIN_RATE_DPS) {
+          target_rate = (yaw_err > 0.0f) ? NAV_BLINDBOX_SPIN_MIN_RATE_DPS
+                                         : -NAV_BLINDBOX_SPIN_MIN_RATE_DPS;
+        }
+        gyro_rate_pid_update(target_rate, s_rate_lpf, 0.0f,
+                             NAV_BLINDBOX_SPIN_MAX_WHEEL_SPD, NAV_RATE_I_LIMIT,
+                             dt_s, out_l, out_r);
+        if (fabsf(yaw_err) <= NAV_BLINDBOX_SPIN_TOL_DEG &&
+            fabsf(s_rate_lpf) <= NAV_BLINDBOX_SPIN_STOP_DPS) {
+          s_blindbox_hold_ms = accumulate_ms(s_blindbox_hold_ms, dt_ms, NAV_BLINDBOX_SPIN_HOLD_MS);
+        } else {
+          s_blindbox_hold_ms = 0U;
+        }
+        if (s_blindbox_hold_ms >= NAV_BLINDBOX_SPIN_HOLD_MS ||
+            s_blindbox_ms >= NAV_BLINDBOX_SPIN_MAX_MS) {
+          s_yaw_ref = target_yaw;
+          enter_state(TRK_BLINDBOX_SEEK);
+          *out_l = 0.0f;
+          *out_r = 0.0f;
+        }
+      } else {
+        s_blindbox_turn_mm += 1000.0f * ((float)left_delta / TRACK_LEFT_COUNTS_PER_METER -
+                                         (float)right_delta / TRACK_RIGHT_COUNTS_PER_METER);
+        *out_l = NAV_BLINDBOX_NO_GYRO_WHEEL_SPD;
+        *out_r = -NAV_BLINDBOX_NO_GYRO_WHEEL_SPD;
+        if (s_blindbox_turn_mm >= NAV_BLINDBOX_NO_GYRO_SPIN_MM ||
+            s_blindbox_ms >= NAV_BLINDBOX_SPIN_MAX_MS) {
+          enter_state(TRK_BLINDBOX_SEEK);
+          *out_l = 0.0f;
+          *out_r = 0.0f;
+        }
+      }
+      break;
+    }
+
+    case TRK_BLINDBOX_SEEK: {
+      float dt_ms = dt_s * 1000.0f;
+      s_blindbox_ms = accumulate_ms(s_blindbox_ms, dt_ms, NAV_BLINDBOX_SEEK_MAX_MS);
+      if (scan.cluster_count >= 1U) {
+        follow_line_pid(&scan, 0, NAV_BLINDBOX_CREEP_SPEED,
+                        NAV_BLINDBOX_CREEP_MAX_RATE_DPS, dt_s, out_l, out_r);
+      } else {
+        follow_yaw_hold(s_yaw_ref, NAV_BLINDBOX_CREEP_SPEED, out_l, out_r);
+      }
+      if (is_finish_bar(&scan)) {
+        s_finish_active_ms = accumulate_ms(s_finish_active_ms, dt_ms, NAV_FINISH_DEBOUNCE_MS);
+      } else {
+        s_finish_active_ms = 0U;
+      }
+      if (s_finish_active_ms >= NAV_FINISH_DEBOUNCE_MS) {
+        enter_state(TRK_BLINDBOX_SETTLE);
+        *out_l = 0.0f;
+        *out_r = 0.0f;
+      } else if (s_seg_mm >= NAV_BLINDBOX_SEEK_MAX_MM ||
+                 s_blindbox_ms >= NAV_BLINDBOX_SEEK_MAX_MS) {
+        enter_state(TRK_DONE);
+        *out_l = 0.0f;
+        *out_r = 0.0f;
+        return 1U;
+      }
+      break;
+    }
+
+    case TRK_BLINDBOX_SETTLE: {
+      float dt_ms = dt_s * 1000.0f;
+      s_blindbox_ms = accumulate_ms(s_blindbox_ms, dt_ms, NAV_BLINDBOX_SETTLE_MAX_MS);
+      if (fabsf(left_spd) <= NAV_FINISH_STOP_SPEED &&
+          fabsf(right_spd) <= NAV_FINISH_STOP_SPEED) {
+        s_blindbox_hold_ms = accumulate_ms(s_blindbox_hold_ms, dt_ms, NAV_BLINDBOX_SETTLE_HOLD_MS);
+      } else {
+        s_blindbox_hold_ms = 0U;
+      }
+      if (left_spd > NAV_FINISH_BRAKE_FAST_SPEED) *out_l = -NAV_BLINDBOX_BRAKE_REV_SPEED;
+      else if (left_spd < -NAV_FINISH_BRAKE_FAST_SPEED) *out_l = NAV_BLINDBOX_BRAKE_REV_SPEED;
+      else *out_l = 0.0f;
+      if (right_spd > NAV_FINISH_BRAKE_FAST_SPEED) *out_r = -NAV_BLINDBOX_BRAKE_REV_SPEED;
+      else if (right_spd < -NAV_FINISH_BRAKE_FAST_SPEED) *out_r = NAV_BLINDBOX_BRAKE_REV_SPEED;
+      else *out_r = 0.0f;
+
+      if (s_blindbox_hold_ms >= NAV_BLINDBOX_SETTLE_HOLD_MS ||
+          s_blindbox_ms >= NAV_BLINDBOX_SETTLE_MAX_MS) {
+        if (is_finish_bar(&scan) || s_blindbox_retry >= NAV_BLINDBOX_MAX_RETRIES) {
+          enter_state(TRK_DONE);
+        } else {
+          s_blindbox_nudge_dir = ((s_blindbox_retry & 1U) == 0U) ? -1 : 1;
+          ++s_blindbox_retry;
+          enter_state(TRK_BLINDBOX_NUDGE);
+        }
+        *out_l = 0.0f;
+        *out_r = 0.0f;
+        return 1U;
+      }
+      break;
+    }
+
+    case TRK_BLINDBOX_NUDGE: {
+      float dt_ms = dt_s * 1000.0f;
+      s_blindbox_ms = accumulate_ms(s_blindbox_ms, dt_ms, NAV_BLINDBOX_NUDGE_MAX_MS);
+      if (s_blindbox_nudge_dir > 0 && scan.cluster_count >= 1U) {
+        follow_line_pid(&scan, 0, NAV_BLINDBOX_NUDGE_SPEED,
+                        NAV_BLINDBOX_NUDGE_MAX_RATE_DPS, dt_s, out_l, out_r);
+      } else {
+        follow_yaw_hold(s_yaw_ref, (float)s_blindbox_nudge_dir * NAV_BLINDBOX_NUDGE_SPEED,
+                        out_l, out_r);
+      }
+      if (is_finish_bar(&scan)) {
+        s_finish_active_ms = accumulate_ms(s_finish_active_ms, dt_ms, NAV_FINISH_DEBOUNCE_MS);
+      } else {
+        s_finish_active_ms = 0U;
+      }
+      if (s_finish_active_ms >= NAV_FINISH_DEBOUNCE_MS ||
+          fabsf(s_seg_mm) >= NAV_BLINDBOX_NUDGE_MAX_MM ||
+          s_blindbox_ms >= NAV_BLINDBOX_NUDGE_MAX_MS) {
+        enter_state(TRK_BLINDBOX_SETTLE);
+        *out_l = 0.0f;
+        *out_r = 0.0f;
+      }
+      break;
+    }
+
+    case TRK_DONE:
+      *out_l = 0.0f;
+      *out_r = 0.0f;
+      return 1U;
     case TRK_FAULT_STOP:
     default:
       *out_l = 0.0f;
@@ -1499,10 +1728,25 @@ uint8_t TrackNav_Step(int32_t left_delta, int32_t right_delta, float dt_s,
       return 1U;
   }
 
-  if (s_state == TRK_DONE) {
-    return finish_active_brake_step(left_spd, right_spd, dt_s, out_l, out_r);
+  if (s_state == TRK_FINISH_BRAKE) {
+    if (finish_active_brake_step(left_spd, right_spd, dt_s, out_l, out_r)) {
+      if (NAV_BLINDBOX_ENABLE) {
+        if (NAV_BLINDBOX_WAIT_MS > 0U) {
+          enter_state(TRK_BLINDBOX_WAIT);
+        } else {
+          s_yaw_ref = s_yaw_deg;
+          enter_state(TRK_BLINDBOX_SPIN);
+        }
+      } else {
+        enter_state(TRK_DONE);
+      }
+      *out_l = 0.0f;
+      *out_r = 0.0f;
+      return 1U;
+    }
+    return 0U;
   }
-  if (s_state == TRK_FAULT_STOP) {
+  if (s_state == TRK_DONE || s_state == TRK_FAULT_STOP) {
     *out_l = 0.0f;
     *out_r = 0.0f;
     return 1U;
